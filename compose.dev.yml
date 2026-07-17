@@ -1,0 +1,57 @@
+name: grokcli-2api-dev
+
+x-dev-common: &dev-common
+  image: grokcli-2api:dev
+  build:
+    context: .
+    dockerfile: Dockerfile
+  network_mode: host
+  env_file:
+    - path: ${GROK2API_ENV_FILE:-.env.dev}
+      required: true
+  volumes:
+    - .:/app
+  init: true
+  restart: unless-stopped
+
+services:
+  api-dev:
+    <<: *dev-common
+    container_name: grokcli-2api-api-dev
+    environment:
+      GROK2API_RUNTIME: python
+      GROK2API_RELOAD: "1"
+      GROK2API_WORKERS: "1"
+      GROK2API_INLINE_SOLVER: "0"
+    entrypoint: ["python", "/app/app.py"]
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - curl -fsS http://127.0.0.1:$${GROK2API_PORT:-3000}/ >/dev/null
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+
+  solver-dev:
+    <<: *dev-common
+    container_name: grokcli-2api-solver-dev
+    environment:
+      GROK2API_INLINE_SOLVER: "0"
+    entrypoint: ["python", "/app/scripts/dev_watch.py", "solver"]
+    shm_size: 1gb
+    security_opt:
+      - seccomp:unconfined
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - curl -fsS http://127.0.0.1:$${TURNSTILE_PORT:-5072}/health >/dev/null
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 90s
+
+  assets-dev:
+    <<: *dev-common
+    container_name: grokcli-2api-assets-dev
+    entrypoint: ["python", "/app/scripts/dev_watch.py", "assets"]
