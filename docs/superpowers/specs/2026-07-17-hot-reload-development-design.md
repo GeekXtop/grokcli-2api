@@ -10,6 +10,30 @@ Build the repository Docker image once to obtain the complete Python, browser, C
 
 Source-only edits do not rebuild the image. Rebuilds are required only when changing the Dockerfile, Python requirement files, browser dependencies, or when validating a newly compiled Go binary.
 
+## Git Branch Strategy
+
+The fork uses two long-lived branches with separate responsibilities:
+
+- `main` is a clean mirror of `upstream/main` and contains no local configuration or code changes.
+- `local-customizations` contains the development environment and all personal code changes.
+
+`origin` points to `GeekXtop/grokcli-2api`, while `upstream` points to `HM2899/grokcli-2api`. Pushes to the `upstream` remote are disabled locally to prevent accidental writes.
+
+Upstream updates are integrated with merge commits rather than rebasing the customization branch. This makes conflicts explicit, preserves the history of local changes, and allows Git `rerere` to reuse previous conflict resolutions.
+
+The normal update flow is:
+
+```bash
+git switch main
+git fetch upstream
+git merge --ff-only upstream/main
+
+git switch local-customizations
+git merge main
+```
+
+After verification, either branch may be pushed to the fork explicitly. Development work never lands directly on `main`.
+
 ## Architecture
 
 The development Compose stack contains three services using host networking:
