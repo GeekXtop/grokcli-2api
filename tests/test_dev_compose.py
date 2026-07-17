@@ -48,6 +48,14 @@ class DevComposeTests(unittest.TestCase):
         self.assertEqual("1", environment["GROK2API_WORKERS"])
         self.assertEqual("0", environment["GROK2API_INLINE_SOLVER"])
 
+    def test_only_api_service_builds_the_shared_image(self) -> None:
+        services_with_build = {
+            name
+            for name, service in self.config["services"].items()
+            if "build" in service
+        }
+        self.assertEqual({"api-dev"}, services_with_build)
+
     def test_env_example_is_not_ignored(self) -> None:
         result = subprocess.run(
             ["git", "check-ignore", ".env.dev.example"],

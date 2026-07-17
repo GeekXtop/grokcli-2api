@@ -2,9 +2,6 @@ name: grokcli-2api-dev
 
 x-dev-common: &dev-common
   image: grokcli-2api:dev
-  build:
-    context: .
-    dockerfile: Dockerfile
   network_mode: host
   env_file:
     - path: ${GROK2API_ENV_FILE:-.env.dev}
@@ -17,6 +14,9 @@ x-dev-common: &dev-common
 services:
   api-dev:
     <<: *dev-common
+    build:
+      context: .
+      dockerfile: Dockerfile
     container_name: grokcli-2api-api-dev
     environment:
       GROK2API_RUNTIME: python

@@ -329,6 +329,14 @@ class DevComposeTests(unittest.TestCase):
         self.assertEqual("1", environment["GROK2API_WORKERS"])
         self.assertEqual("0", environment["GROK2API_INLINE_SOLVER"])
 
+    def test_only_api_service_builds_the_shared_image(self) -> None:
+        services_with_build = {
+            name
+            for name, service in self.config["services"].items()
+            if "build" in service
+        }
+        self.assertEqual({"api-dev"}, services_with_build)
+
     def test_env_example_is_not_ignored(self) -> None:
         result = subprocess.run(
             ["git", "check-ignore", ".env.dev.example"],
@@ -408,9 +416,6 @@ name: grokcli-2api-dev
 
 x-dev-common: &dev-common
   image: grokcli-2api:dev
-  build:
-    context: .
-    dockerfile: Dockerfile
   network_mode: host
   env_file:
     - path: ${GROK2API_ENV_FILE:-.env.dev}
@@ -423,6 +428,9 @@ x-dev-common: &dev-common
 services:
   api-dev:
     <<: *dev-common
+    build:
+      context: .
+      dockerfile: Dockerfile
     container_name: grokcli-2api-api-dev
     environment:
       GROK2API_RUNTIME: python
@@ -467,7 +475,7 @@ Run:
 python3 -m unittest tests.test_dev_compose -v
 ```
 
-Expected: 4 tests pass.
+Expected: 5 tests pass.
 
 - [ ] **Step 7: Validate the Compose model directly**
 
@@ -563,7 +571,7 @@ Run:
 python3 -m unittest tests.test_dev_watch tests.test_dev_compose -v
 ```
 
-Expected: 7 tests pass.
+Expected: 8 tests pass.
 
 - [ ] **Step 4: Run repository formatting and syntax checks for changed files**
 
