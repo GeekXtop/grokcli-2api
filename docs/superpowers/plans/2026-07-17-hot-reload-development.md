@@ -42,11 +42,13 @@ Create `tests/__init__.py` as an empty file and create `tests/test_dev_watch.py`
 from __future__ import annotations
 
 import os
+import sys
 import tempfile
+import time
 import unittest
 from pathlib import Path
 
-from scripts.dev_watch import snapshot, solver_command
+from scripts.dev_watch import snapshot, solver_command, start_child, stop_child
 
 
 class SnapshotTests(unittest.TestCase):
@@ -88,6 +90,37 @@ class SolverCommandTests(unittest.TestCase):
         self.assertIn("127.0.0.1", command)
         self.assertIn("5073", command)
         self.assertEqual("api_solver.py", Path(command[1]).name)
+
+
+class ChildProcessTests(unittest.TestCase):
+    def test_child_starts_in_its_own_process_group(self) -> None:
+        child = start_child(
+            [sys.executable, "-c", "import time; time.sleep(30)"],
+            cwd=Path.cwd(),
+        )
+        try:
+            self.assertEqual(child.pid, os.getpgid(child.pid))
+        finally:
+            stop_child(child, terminate_timeout=0.2, kill_timeout=1.0)
+
+    def test_stop_child_quickly_kills_sigterm_ignoring_process(self) -> None:
+        child = start_child(
+            [
+                sys.executable,
+                "-c",
+                (
+                    "import signal,time; "
+                    "signal.signal(signal.SIGTERM, lambda *_: None); "
+                    "time.sleep(30)"
+                ),
+            ],
+            cwd=Path.cwd(),
+        )
+        time.sleep(0.1)
+        started = time.monotonic()
+        stop_child(child, terminate_timeout=0.2, kill_timeout=1.0)
+        self.assertIsNotNone(child.poll())
+        self.assertLess(time.monotonic() - started, 2.0)
 
 
 if __name__ == "__main__":
@@ -160,15 +193,30 @@ def solver_command(env: Mapping[str, str]) -> list[str]:
     ]
 
 
-def stop_child(child: subprocess.Popen[bytes] | None) -> None:
+def start_child(command: Sequence[str], *, cwd: Path) -> subprocess.Popen[bytes]:
+    return subprocess.Popen(command, cwd=cwd, start_new_session=True)
+
+
+def stop_child(
+    child: subprocess.Popen[bytes] | None,
+    *,
+    terminate_timeout: float = 2.0,
+    kill_timeout: float = 2.0,
+) -> None:
     if child is None or child.poll() is not None:
         return
-    child.terminate()
+    if os.name == "posix":
+        os.killpg(child.pid, signal.SIGTERM)
+    else:
+        child.terminate()
     try:
-        child.wait(timeout=8)
+        child.wait(timeout=terminate_timeout)
     except subprocess.TimeoutExpired:
-        child.kill()
-        child.wait(timeout=3)
+        if os.name == "posix":
+            os.killpg(child.pid, signal.SIGKILL)
+        else:
+            child.kill()
+        child.wait(timeout=kill_timeout)
 
 
 def wait_for_change(
@@ -198,7 +246,7 @@ def run_solver() -> int:
 
     while not stopping:
         print("[dev-watch] starting Turnstile solver", flush=True)
-        child = subprocess.Popen(
+        child = start_child(
             solver_command(os.environ), cwd=ROOT / "turnstile-solver"
         )
         while child.poll() is None and not stopping:
@@ -248,7 +296,7 @@ Run:
 python3 -m unittest tests.test_dev_watch -v
 ```
 
-Expected: 3 tests pass.
+Expected: 5 tests pass.
 
 - [ ] **Step 5: Run syntax checks**
 
@@ -380,7 +428,8 @@ TZ=Asia/Shanghai
 
 GROK2API_RUNTIME=python
 GROK2API_HOST=127.0.0.1
-GROK2API_PORT=3000
+GROK2API_PORT=40081
+GROK2API_PUBLIC_BASE_URL=http://127.0.0.1:40081
 GROK2API_OPEN_BROWSER=0
 GROK2API_RELOAD=1
 GROK2API_WORKERS=1
@@ -537,8 +586,8 @@ docker compose -f compose.dev.yml logs -f
 ## 状态检查
 
 ```bash
-curl -fsS http://127.0.0.1:3000/
-curl -s http://127.0.0.1:3000/health | jq '.store'
+curl -fsS http://127.0.0.1:40081/
+curl -s http://127.0.0.1:40081/health | jq '.store'
 curl -fsS http://127.0.0.1:5072/health
 ```
 
@@ -571,7 +620,7 @@ Run:
 python3 -m unittest tests.test_dev_watch tests.test_dev_compose -v
 ```
 
-Expected: 8 tests pass.
+Expected: 10 tests pass.
 
 - [ ] **Step 4: Run repository formatting and syntax checks for changed files**
 

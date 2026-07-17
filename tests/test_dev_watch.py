@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import os
+import sys
 import tempfile
+import time
 import unittest
 from pathlib import Path
 
-from scripts.dev_watch import snapshot, solver_command
+from scripts.dev_watch import snapshot, solver_command, start_child, stop_child
 
 
 class SnapshotTests(unittest.TestCase):
@@ -47,6 +49,39 @@ class SolverCommandTests(unittest.TestCase):
         self.assertIn("127.0.0.1", command)
         self.assertIn("5073", command)
         self.assertEqual("api_solver.py", Path(command[1]).name)
+
+
+class ChildProcessTests(unittest.TestCase):
+    def test_child_starts_in_its_own_process_group(self) -> None:
+        child = start_child(
+            [sys.executable, "-c", "import time; time.sleep(30)"],
+            cwd=Path.cwd(),
+        )
+        try:
+            self.assertEqual(child.pid, os.getpgid(child.pid))
+        finally:
+            stop_child(child, terminate_timeout=0.2, kill_timeout=1.0)
+
+    def test_stop_child_quickly_kills_sigterm_ignoring_process(self) -> None:
+        child = start_child(
+            [
+                sys.executable,
+                "-c",
+                (
+                    "import signal,time; "
+                    "signal.signal(signal.SIGTERM, lambda *_: None); "
+                    "time.sleep(30)"
+                ),
+            ],
+            cwd=Path.cwd(),
+        )
+        time.sleep(0.1)
+        started = time.monotonic()
+
+        stop_child(child, terminate_timeout=0.2, kill_timeout=1.0)
+
+        self.assertIsNotNone(child.poll())
+        self.assertLess(time.monotonic() - started, 2.0)
 
 
 if __name__ == "__main__":

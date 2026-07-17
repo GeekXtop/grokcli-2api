@@ -44,6 +44,11 @@ class DevComposeTests(unittest.TestCase):
 
     def test_api_has_reload_and_single_worker(self) -> None:
         environment = self.config["services"]["api-dev"]["environment"]
+        self.assertEqual("40081", environment["GROK2API_PORT"])
+        self.assertEqual(
+            "http://127.0.0.1:40081",
+            environment.get("GROK2API_PUBLIC_BASE_URL"),
+        )
         self.assertEqual("1", environment["GROK2API_RELOAD"])
         self.assertEqual("1", environment["GROK2API_WORKERS"])
         self.assertEqual("0", environment["GROK2API_INLINE_SOLVER"])

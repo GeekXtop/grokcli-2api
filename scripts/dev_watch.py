@@ -49,15 +49,30 @@ def solver_command(env: Mapping[str, str]) -> list[str]:
     ]
 
 
-def stop_child(child: subprocess.Popen[bytes] | None) -> None:
+def start_child(command: Sequence[str], *, cwd: Path) -> subprocess.Popen[bytes]:
+    return subprocess.Popen(command, cwd=cwd, start_new_session=True)
+
+
+def stop_child(
+    child: subprocess.Popen[bytes] | None,
+    *,
+    terminate_timeout: float = 2.0,
+    kill_timeout: float = 2.0,
+) -> None:
     if child is None or child.poll() is not None:
         return
-    child.terminate()
+    if os.name == "posix":
+        os.killpg(child.pid, signal.SIGTERM)
+    else:
+        child.terminate()
     try:
-        child.wait(timeout=8)
+        child.wait(timeout=terminate_timeout)
     except subprocess.TimeoutExpired:
-        child.kill()
-        child.wait(timeout=3)
+        if os.name == "posix":
+            os.killpg(child.pid, signal.SIGKILL)
+        else:
+            child.kill()
+        child.wait(timeout=kill_timeout)
 
 
 def wait_for_change(
@@ -89,7 +104,7 @@ def run_solver() -> int:
 
     while not stopping:
         print("[dev-watch] starting Turnstile solver", flush=True)
-        child = subprocess.Popen(
+        child = start_child(
             solver_command(os.environ), cwd=ROOT / "turnstile-solver"
         )
         while child.poll() is None and not stopping:
