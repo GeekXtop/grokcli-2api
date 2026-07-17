@@ -12,7 +12,7 @@
 
 - Work only on `local-customizations`; `main` remains an unmodified mirror of `upstream/main`.
 - Do not add PostgreSQL or Redis services to the development Compose stack.
-- Default API and solver listeners must bind to `127.0.0.1`.
+- API binds to `0.0.0.0:40081` for trusted LAN access; solver remains on `127.0.0.1:5072`.
 - Development API uses Python runtime, reload enabled, and exactly one worker.
 - Source edits must not require an image rebuild.
 - Rebuild only for Dockerfile, requirements, browser dependency, or compiled Go binary changes.
@@ -427,9 +427,9 @@ Create the template with:
 TZ=Asia/Shanghai
 
 GROK2API_RUNTIME=python
-GROK2API_HOST=127.0.0.1
+GROK2API_HOST=0.0.0.0
 GROK2API_PORT=40081
-GROK2API_PUBLIC_BASE_URL=http://127.0.0.1:40081
+GROK2API_PUBLIC_BASE_URL=http://192.168.100.105:40081
 GROK2API_OPEN_BROWSER=0
 GROK2API_RELOAD=1
 GROK2API_WORKERS=1

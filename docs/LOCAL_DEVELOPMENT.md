@@ -2,6 +2,8 @@
 
 本开发栈只运行 API、Turnstile Solver 和静态资源监听器。PostgreSQL 与 Redis 使用宿主机现有服务。
 
+API 默认监听 `0.0.0.0:40081`，可通过局域网地址 `http://192.168.100.105:40081/admin` 访问。Turnstile Solver 仍只监听 `127.0.0.1:5072`，不会暴露到局域网。
+
 PostgreSQL 数据库必须使用 UTF-8 编码；项目初始化 Schema 时包含 Unicode 文本，`SQL_ASCII` 数据库会启动失败。示例：
 
 ```bash
@@ -39,6 +41,12 @@ docker compose -f compose.dev.yml logs -f
 curl -fsS http://127.0.0.1:40081/
 curl -s http://127.0.0.1:40081/health | jq '.store'
 curl -fsS http://127.0.0.1:5072/health
+```
+
+局域网设备使用：
+
+```text
+http://192.168.100.105:40081/admin
 ```
 
 没有导入 Grok 账号时，应用 `/health` 返回 503 是预期行为。

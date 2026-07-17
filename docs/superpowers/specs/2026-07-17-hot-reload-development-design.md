@@ -42,7 +42,7 @@ The development Compose stack contains three services using host networking:
 2. `solver-dev` runs the Turnstile solver under a file watcher and restarts it when solver Python files change.
 3. `assets-dev` watches admin JavaScript and CSS sources and reruns the hashed-asset builder.
 
-All services bind-mount the same repository. The API connects to host PostgreSQL and Redis through `127.0.0.1`. The solver listens on host loopback port `5072`, and the API reaches it through the same address. Inline solver startup is disabled in the API container to prevent duplicate solver processes.
+All services bind-mount the same repository. The API connects to host PostgreSQL and Redis through `127.0.0.1`. The API listens on `0.0.0.0:40081` for trusted LAN access, while the solver remains on host loopback port `5072`; the API reaches it through the same loopback address. Inline solver startup is disabled in the API container to prevent duplicate solver processes.
 
 ## Configuration
 
@@ -57,7 +57,8 @@ Required behavior:
 - `GROK2API_REQUIRE_SHARED_STORES=1`
 - PostgreSQL and Redis URLs point at `127.0.0.1`
 - `GROK2API_INLINE_SOLVER=0` in container services
-- API and solver listen only on `127.0.0.1` by default
+- API listens on `0.0.0.0:40081` for LAN access
+- Solver listens only on `127.0.0.1:5072`
 
 Secrets are never committed. The Redis key prefix is configurable so the development instance does not collide with another application using the same Redis database.
 
@@ -80,7 +81,8 @@ The default development loop remains Python because the project itself marks the
 - The API fails closed when PostgreSQL or Redis is unreachable.
 - The API and solver are separate services, so a solver crash does not terminate the API container.
 - Compose restarts failed long-running development services unless explicitly stopped.
-- The solver uses loopback-only networking so it is not exposed publicly.
+- The solver uses loopback-only networking so it is not exposed to the LAN.
+- API access is limited by the host/LAN boundary and application authentication.
 - The API container health check uses `/`, because `/health` intentionally returns HTTP 503 before a Grok account is imported.
 
 ## Developer Workflow
@@ -116,4 +118,4 @@ The implementation is complete when:
 4. Editing a Turnstile solver Python file restarts only the solver service process.
 5. Editing an admin JS or CSS source regenerates `static/dist` assets.
 6. No PostgreSQL, Redis, or duplicate inline solver container is created.
-7. The API and solver are reachable only through host loopback by default.
+7. The API is reachable through the host LAN address while the solver remains loopback-only.

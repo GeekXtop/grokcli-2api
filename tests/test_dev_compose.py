@@ -44,14 +44,20 @@ class DevComposeTests(unittest.TestCase):
 
     def test_api_has_reload_and_single_worker(self) -> None:
         environment = self.config["services"]["api-dev"]["environment"]
+        self.assertEqual("0.0.0.0", environment["GROK2API_HOST"])
         self.assertEqual("40081", environment["GROK2API_PORT"])
         self.assertEqual(
-            "http://127.0.0.1:40081",
+            "http://192.168.100.105:40081",
             environment.get("GROK2API_PUBLIC_BASE_URL"),
         )
         self.assertEqual("1", environment["GROK2API_RELOAD"])
         self.assertEqual("1", environment["GROK2API_WORKERS"])
         self.assertEqual("0", environment["GROK2API_INLINE_SOLVER"])
+
+    def test_solver_stays_bound_to_loopback(self) -> None:
+        environment = self.config["services"]["solver-dev"]["environment"]
+        self.assertEqual("127.0.0.1", environment["TURNSTILE_HOST"])
+        self.assertEqual("5072", environment["TURNSTILE_PORT"])
 
     def test_only_api_service_builds_the_shared_image(self) -> None:
         services_with_build = {
