@@ -305,6 +305,8 @@ echo "$GITHUB_TOKEN" | docker login ghcr.io -u YOUR_GITHUB_USERNAME --password-s
 
 ### 本地开发热更新
 
+> Fork 本地定制开发：使用宿主机 PostgreSQL/Redis，并分别热更新 API、注册机和管理台资源，参见 [`docs/LOCAL_DEVELOPMENT.md`](docs/LOCAL_DEVELOPMENT.md)。
+
 生产默认 `reload=False` + 多 worker。改代码后要自动重启：
 
 ```bash
