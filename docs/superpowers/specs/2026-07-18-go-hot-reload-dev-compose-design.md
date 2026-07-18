@@ -22,10 +22,11 @@ the Go compiler.
 
 `api-dev` builds the `development` target and starts
 `python /app/scripts/dev_watch.py api`. The watcher compiles
-`./cmd/grok2api` to `/tmp/grok2api-dev`, outside the `/app` bind mount, then
-starts it through `/app/entrypoint.sh`. This keeps the Python registration and
-SSO sidecars managed by the existing entrypoint while avoiding the bind mount
-that hides image-baked files under `/app/bin`.
+`./cmd/grok2api` to `/tmp/grok2api-dev` and `./cmd/grok2api-migrate` to
+`/tmp/grok2api-migrate-dev`, outside the `/app` bind mount, then starts the
+main binary through `/app/entrypoint.sh`. This keeps schema migration and the
+Python registration/SSO sidecars managed by the existing entrypoint while
+avoiding the bind mount that hides image-baked files under `/app/bin`.
 
 ## Watch and Restart Behavior
 
@@ -40,13 +41,15 @@ The API watcher observes:
 On startup and after a debounced change, it runs:
 
 ```bash
-go build -o /tmp/grok2api-dev ./cmd/grok2api
+go build -o /tmp/grok2api-dev.next ./cmd/grok2api
+go build -o /tmp/grok2api-migrate-dev.next ./cmd/grok2api-migrate
 ```
 
-If compilation succeeds, the watcher stops the prior process group and starts
-`/app/entrypoint.sh /tmp/grok2api-dev`. If compilation fails, it reports the
-failure, leaves the watcher alive, and waits for another source change instead
-of entering a rapid restart loop.
+If both compilations succeed, the watcher atomically promotes both `.next`
+binaries, stops the prior process group, and starts
+`/app/entrypoint.sh /tmp/grok2api-dev`. If either compilation fails, it reports
+the failure, keeps the prior process running, and waits for another source
+change instead of entering a rapid restart loop.
 
 SIGTERM and SIGINT stop the current API process group before the watcher exits.
 
@@ -56,6 +59,7 @@ SIGTERM and SIGINT stop the current API process group before the watcher exits.
 
 - build Dockerfile target `development`;
 - set `GROK2API_RUNTIME=go`;
+- set `GROK2API_MIGRATE_BIN=/tmp/grok2api-migrate-dev`;
 - keep one worker and disable the inline solver;
 - run `python /app/scripts/dev_watch.py api`;
 - keep its existing health check and GitHub build secret.
