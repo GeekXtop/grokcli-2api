@@ -4,16 +4,17 @@
 
 **Goal:** Make the root development image build fail unless the Camoufox browser required by the local Turnstile solver is installed.
 
-**Architecture:** Keep the change at the image-build boundary. A focused static regression test locks down the shell-command structure, while the Dockerfile treats Camoufox as required, validates its active version, and keeps Patchright as an independently optional fallback.
+**Architecture:** Keep the change at the image-build boundary. Compose exposes an optional `GITHUB_TOKEN` as a BuildKit secret, and the Dockerfile mounts it only while fetching Camoufox. Focused static regression tests lock down the shell-command and Compose structure, while the Dockerfile treats Camoufox as required, validates its active version, and keeps Patchright as an independently optional fallback.
 
 **Tech Stack:** Dockerfile, Python `unittest`, Docker Compose
 
 ## Global Constraints
 
-- Modify only the root `Dockerfile` used by `compose.dev.yml` plus a focused regression test.
+- Modify the root `Dockerfile`, `compose.dev.yml`, and focused regression tests.
 - Do not change `turnstile-solver/Dockerfile`, host startup scripts, health checks, or frontend error formatting.
 - Camoufox fetch and validation must fail the image build on error.
 - Patchright installation remains optional.
+- Never persist `GITHUB_TOKEN` in an image layer or runtime environment.
 
 ---
 
@@ -21,10 +22,12 @@
 
 **Files:**
 - Create: `tests/test_dockerfile.py`
-- Modify: `Dockerfile:92-94`
+- Modify: `Dockerfile:1,92-101`
+- Modify: `compose.dev.yml:18-23,60-63`
+- Modify: `tests/test_dev_compose.py:65-78`
 
 **Interfaces:**
-- Consumes: the root `Dockerfile` text and the `python -m camoufox` CLI already installed from `turnstile-solver/requirements.txt`.
+- Consumes: the root `Dockerfile` text, the Compose JSON model, and the `python -m camoufox` CLI already installed from `turnstile-solver/requirements.txt`.
 - Produces: a development image in which `python -m camoufox active` cannot report `not fetched` after a successful build.
 
 - [ ] **Step 1: Write the failing regression test**
@@ -74,9 +77,12 @@ Expected: `ERROR` or `FAIL` because the current Dockerfile does not contain a se
 Replace the existing browser-prefetch command with:
 
 ```dockerfile
+# syntax=docker/dockerfile:1.10
+
 # Camoufox is required by the local Turnstile solver. Fail the image build if
 # its repository sync/download silently leaves the active channel unfetched.
-RUN python -m camoufox fetch \
+RUN --mount=type=secret,id=github_token,env=GITHUB_TOKEN,required=false \
+    python -m camoufox fetch \
     && active="$(python -m camoufox active)" \
     && case "$active" in \
          *"not fetched"*) echo "Camoufox browser was not installed: $active" >&2; exit 1 ;; \
@@ -84,6 +90,21 @@ RUN python -m camoufox fetch \
 
 # Chromium is only an optional fallback path.
 RUN python -m patchright install chromium || true
+```
+
+Add this under `api-dev.build` in `compose.dev.yml`:
+
+```yaml
+secrets:
+  - github_token
+```
+
+and add this top-level declaration:
+
+```yaml
+secrets:
+  github_token:
+    environment: GITHUB_TOKEN
 ```
 
 - [ ] **Step 4: Run targeted and related tests and verify GREEN**

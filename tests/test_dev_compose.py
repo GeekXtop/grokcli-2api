@@ -67,6 +67,14 @@ class DevComposeTests(unittest.TestCase):
         }
         self.assertEqual({"api-dev"}, services_with_build)
 
+    def test_api_build_reads_github_token_as_a_secret(self) -> None:
+        build = self.config["services"]["api-dev"]["build"]
+        self.assertEqual([{"source": "github_token"}], build["secrets"])
+        self.assertEqual(
+            "GITHUB_TOKEN",
+            self.config["secrets"]["github_token"]["environment"],
+        )
+
     def test_env_example_is_not_ignored(self) -> None:
         result = subprocess.run(
             ["git", "check-ignore", ".env.dev.example"],

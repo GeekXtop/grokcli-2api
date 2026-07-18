@@ -1,3 +1,4 @@
+# syntax=docker/dockerfile:1.10
 # grokcli-2api — single container with optional inline Turnstile Solver
 FROM golang:1.24-bookworm AS go-builder
 
@@ -89,9 +90,17 @@ RUN python -m pip install --no-cache-dir -U pip setuptools wheel \
     && python -m pip install --no-cache-dir -r /app/requirements-store.txt \
     && python -m pip install --no-cache-dir -r /app/turnstile-solver-requirements.txt
 
-# Prefetch browser binaries used by inline solver
-RUN python -m camoufox fetch \
-    && python -m patchright install chromium || true
+# Camoufox is required by the local Turnstile solver. Fail the image build if
+# its repository sync/download silently leaves the active channel unfetched.
+RUN --mount=type=secret,id=github_token,env=GITHUB_TOKEN,required=false \
+    python -m camoufox fetch \
+    && active="$(python -m camoufox active)" \
+    && case "$active" in \
+         *"not fetched"*) echo "Camoufox browser was not installed: $active" >&2; exit 1 ;; \
+       esac
+
+# Chromium is only an optional fallback path.
+RUN python -m patchright install chromium || true
 
 COPY . /app
 COPY --from=go-builder /out/grok2api /app/bin/grok2api
