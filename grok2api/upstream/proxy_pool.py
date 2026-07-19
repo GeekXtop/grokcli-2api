@@ -337,7 +337,7 @@ def resolve_proxy_for_request(
         fallback_env=fallback_env,
     )
     if not pool and fallback_env:
-        # Prefer admin outbound / auto-discovered peer proxies.
+        # Prefer the effective explicitly configured outbound proxy source.
         try:
             src = get_outbound_proxy_source() or {}
             if src.get("enabled", True):
@@ -418,13 +418,7 @@ def curl_proxies_arg(proxy_url: str | None) -> dict[str, str] | None:
 
 
 def _auto_proxy_candidates() -> list[str]:
-    """Best-effort proxies reachable from dockerized app.
-
-    Order:
-      1) env GROK2API_AUTO_PROXY / HTTP(S)_PROXY
-      2) compose-peer service names (privoxy/warp-proxy)
-      3) host-gateway common ports (when extra_hosts host.docker.internal is set)
-    """
+    """Return explicitly configured generic proxy environment values."""
     out: list[str] = []
     for key in (
         "GROK2API_AUTO_PROXY",
@@ -438,17 +432,6 @@ def _auto_proxy_candidates() -> list[str]:
         v = (os.getenv(key) or "").strip()
         if v:
             out.append(v)
-    # Peer containers on shared docker networks.
-    out.extend(
-        [
-            "http://privoxy:8118",
-            "http://warp-proxy:1080",
-            "socks5://warp-proxy:1080",
-            "http://host.docker.internal:40080",
-            "http://host.docker.internal:7890",
-            "http://host.docker.internal:8118",
-        ]
-    )
     # de-dupe preserve order
     seen: set[str] = set()
     uniq: list[str] = []
@@ -490,6 +473,7 @@ def get_outbound_proxy_source() -> dict[str, Any]:
       1) settings_store.outbound_proxy_config (admin UI)
       2) env GROK2API_XAI_PROXY_POOL / GROK2API_XAI_PROXY
       3) registration_config.proxy (shared pool fallback)
+      4) explicit GROK2API_AUTO_PROXY / HTTP(S)_PROXY / ALL_PROXY env
     """
     global _outbound_proxy_cache_key, _outbound_proxy_cache_value
     text = ""
@@ -545,6 +529,12 @@ def get_outbound_proxy_source() -> dict[str, Any]:
         except Exception:
             pass
 
+    if not text:
+        generic_env = _auto_proxy_candidates()
+        if generic_env:
+            text = generic_env[0]
+            source = "env"
+
     cache_key = (bool(enabled), source, text, user, password, strategy)
     with _lock:
         if (
@@ -580,18 +570,6 @@ def get_outbound_proxy_source() -> dict[str, Any]:
             "pool": pool,
             "text": text,
         }
-    if not out.get("pool"):
-        # Auto-discover reachable local/peer proxies so registration/SSO
-        # don't silently go direct when UI pool text is empty.
-        auto = first_working_proxy()
-        if auto:
-            out["text"] = auto
-            out["proxy"] = auto
-            out["pool"] = [auto]
-            out["source"] = "auto"
-            out["enabled"] = True
-            # Re-key cache so empty settings don't stick forever without auto.
-            cache_key = (True, "auto", auto, user, password, strategy)
     with _lock:
         _outbound_proxy_cache_key = cache_key
         _outbound_proxy_cache_value = _copy_outbound_proxy_source(out)

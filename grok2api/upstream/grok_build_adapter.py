@@ -1171,26 +1171,27 @@ def _proxy_pool(
 
     Preference:
       1) explicit proxy_text (+ optional user/pass)
-      2) env / outbound_proxy_config pool
-      3) auto-discovered peer proxy (privoxy etc.)
+      2) effective outbound proxy source (settings / explicit env)
+      3) direct connection
     """
     try:
         from grok2api.upstream.proxy_pool import (
             parse_proxy_pool,
             get_outbound_proxy_source,
-            first_working_proxy,
         )
 
         pool = parse_proxy_pool(
             proxy_text,
             username=username,
             password=password,
-            fallback_env=True,
+            fallback_env=False,
         )
         if pool:
             return pool
         # When registration form proxy is empty, reuse outbound pool text/auth.
         src = get_outbound_proxy_source() or {}
+        if not src.get("enabled", True):
+            return []
         if src.get("enabled", True):
             pool = list(src.get("pool") or [])
             if not pool:
@@ -1202,9 +1203,6 @@ def _proxy_pool(
                 )
             if pool:
                 return pool
-        auto = first_working_proxy()
-        if auto:
-            return [auto]
     except Exception:
         pass
     # Fallback: treat as single proxy via classic normalizer.
@@ -2996,7 +2994,7 @@ def _run_registration(
         )
         import scripts.sso_to_auth_json as sso_import
 
-        token = sso_import.sso_to_token(sso)
+        token = sso_import.sso_to_token(sso, proxy=proxy)
         if not token or not token.get("access_token"):
             _note_reg_pressure("device-flow conversion failed", pause_sec=10)
             raise RuntimeError(

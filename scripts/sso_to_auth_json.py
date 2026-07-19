@@ -121,51 +121,47 @@ def _is_rate_limited_payload(text: str | None = None, url: str | None = None, st
 
 
 
-def _proxy_kwargs() -> dict:
+def _proxy_kwargs(proxy: str | None = None) -> dict:
     """Return curl_cffi compatible proxy kwargs from env / proxy pool."""
     try:
-        try:
-            from grok2api.upstream.proxy_pool import (
-                resolve_proxy_for_request,
-                curl_proxies_arg,
-                get_outbound_proxy_source,
-                first_working_proxy,
-            )
-        except Exception:
-            from proxy_pool import resolve_proxy_for_request, curl_proxies_arg  # type: ignore
-            get_outbound_proxy_source = None  # type: ignore
-            first_working_proxy = None  # type: ignore
+        from grok2api.upstream.proxy_pool import (
+            curl_proxies_arg,
+            get_outbound_proxy_source,
+            pick_proxy,
+        )
 
-        url = resolve_proxy_for_request(fallback_env=True)
-        if not url and get_outbound_proxy_source is not None:
+        url = (proxy or "").strip() if proxy is not None else ""
+        if proxy is None:
             src = get_outbound_proxy_source() or {}
-            pool = list(src.get("pool") or [])
-            url = pool[0] if pool else None
-        if not url and first_working_proxy is not None:
-            url = first_working_proxy()
+            pool = list(src.get("pool") or []) if src.get("enabled") else []
+            url = pick_proxy(
+                pool,
+                strategy=str(src.get("proxy_strategy") or "round_robin"),
+            ) or ""
         proxies = curl_proxies_arg(url)
-        if proxies:
-            return {"proxies": proxies}
+        return {"proxies": proxies} if proxies else {}
     except Exception:
         pass
-    proxy = (
+
+    fallback_proxy = proxy if proxy is not None else (
         os.getenv("GROK2API_XAI_PROXY")
         or os.getenv("GROK2API_PROXY")
         or os.getenv("GROK_CLI_PROXY")
         or ""
-    ).strip()
+    )
+    fallback_proxy = (fallback_proxy or "").strip()
     # Multi-line: take first non-empty line.
-    if "\n" in proxy or "\r" in proxy:
-        proxy = next(
+    if "\n" in fallback_proxy or "\r" in fallback_proxy:
+        fallback_proxy = next(
             (
                 ln.strip()
-                for ln in proxy.replace("\r", "\n").split("\n")
+                for ln in fallback_proxy.replace("\r", "\n").split("\n")
                 if ln.strip() and not ln.strip().startswith("#")
             ),
             "",
         )
-    if proxy:
-        return {"proxies": {"http": proxy, "https": proxy}}
+    if fallback_proxy:
+        return {"proxies": {"http": fallback_proxy, "https": fallback_proxy}}
     return {}
 
 
@@ -217,7 +213,7 @@ def _poll_interval_sec(raw: Any = None) -> float:
     return max(0.4, min(hinted, 1.5))
 
 
-def request_device_code(session: Any | None = None) -> dict | None:
+def request_device_code(session: Any | None = None, *, proxy: str | None = None) -> dict | None:
     """Request OIDC device code. Prefer shared curl_cffi session when given.
 
     Retries on xAI rate limits (HTTP 429 / slow_down) — common when several
@@ -237,7 +233,7 @@ def request_device_code(session: Any | None = None) -> dict | None:
                     headers={"Content-Type": "application/x-www-form-urlencoded"},
                     impersonate="chrome",
                     timeout=timeout,
-                    **_proxy_kwargs(),
+                    **_proxy_kwargs(proxy),
                 )
                 code = int(getattr(r, "status_code", 0) or 0)
                 body = (getattr(r, "text", None) or "")[:300]
@@ -296,6 +292,7 @@ def poll_token(
     *,
     session: Any | None = None,
     immediate: bool = True,
+    proxy: str | None = None,
 ) -> dict | None:
     """Exchange an approved device_code for tokens.
 
@@ -326,7 +323,7 @@ def poll_token(
                     headers={"Content-Type": "application/x-www-form-urlencoded"},
                     impersonate="chrome",
                     timeout=http_timeout,
-                    **_proxy_kwargs(),
+                    **_proxy_kwargs(proxy),
                 )
                 code = int(getattr(r, "status_code", 0) or 0)
                 if code < 400:
@@ -383,7 +380,9 @@ def poll_token(
     return None
 
 
-def sso_to_token(sso_cookie: str, *, quiet: bool = False) -> dict | None:
+def sso_to_token(
+    sso_cookie: str, *, quiet: bool = False, proxy: str | None = None
+) -> dict | None:
     """SSO cookie → token dict (access/refresh/expires_in).
 
     ``quiet=True`` reduces per-account stdout (faster under high concurrency).
@@ -396,7 +395,7 @@ def sso_to_token(sso_cookie: str, *, quiet: bool = False) -> dict | None:
     s = requests.Session()
     s.cookies.set("sso", sso_cookie, domain=".x.ai")
     timeout = _http_timeout()
-    proxy_kw = _proxy_kwargs()
+    proxy_kw = _proxy_kwargs(proxy)
 
     try:
         r = s.get(
@@ -416,7 +415,7 @@ def sso_to_token(sso_cookie: str, *, quiet: bool = False) -> dict | None:
     retries = _device_flow_retries()
     for attempt in range(1, retries + 1):
         log(f"  🔑 Device Flow... (try {attempt}/{retries})")
-        dc = request_device_code(session=s)
+        dc = request_device_code(session=s, proxy=proxy)
         if not dc:
             if attempt < retries:
                 time.sleep(_device_flow_backoff_sec(attempt))
@@ -497,6 +496,7 @@ def sso_to_token(sso_cookie: str, *, quiet: bool = False) -> dict | None:
             timeout=float(os.getenv("GROK2API_SSO_POLL_TIMEOUT", "45") or 45),
             session=s,
             immediate=True,
+            proxy=proxy,
         )
         if not token:
             if attempt < retries:
