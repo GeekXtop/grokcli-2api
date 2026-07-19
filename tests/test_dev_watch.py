@@ -7,7 +7,15 @@ import time
 import unittest
 from pathlib import Path
 
-from scripts.dev_watch import snapshot, solver_command, start_child, stop_child
+from scripts.dev_watch import (
+    api_build_commands,
+    api_command,
+    promote_api_binaries,
+    snapshot,
+    solver_command,
+    start_child,
+    stop_child,
+)
 
 
 class SnapshotTests(unittest.TestCase):
@@ -49,6 +57,53 @@ class SolverCommandTests(unittest.TestCase):
         self.assertIn("127.0.0.1", command)
         self.assertIn("5073", command)
         self.assertEqual("api_solver.py", Path(command[1]).name)
+
+
+class ApiWatcherTests(unittest.TestCase):
+    def test_api_build_commands_compile_main_and_migrations_to_next_paths(self) -> None:
+        self.assertEqual(
+            [
+                ["go", "build", "-o", "/tmp/grok2api-dev.next", "./cmd/grok2api"],
+                [
+                    "go",
+                    "build",
+                    "-o",
+                    "/tmp/grok2api-migrate-dev.next",
+                    "./cmd/grok2api-migrate",
+                ],
+            ],
+            api_build_commands(),
+        )
+
+    def test_api_command_runs_through_entrypoint(self) -> None:
+        self.assertEqual(
+            ["/app/entrypoint.sh", "/tmp/grok2api-dev"],
+            api_command(),
+        )
+
+    def test_failed_api_build_does_not_promote_next_binaries(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            main = root / "main"
+            migrate = root / "migrate"
+            main_next = root / "main.next"
+            migrate_next = root / "migrate.next"
+            main.write_text("old-main")
+            migrate.write_text("old-migrate")
+            main_next.write_text("new-main")
+            migrate_next.write_text("new-migrate")
+
+            self.assertFalse(
+                promote_api_binaries(
+                    main_next,
+                    migrate_next,
+                    main,
+                    migrate,
+                    build_succeeded=False,
+                )
+            )
+            self.assertEqual("old-main", main.read_text())
+            self.assertEqual("old-migrate", migrate.read_text())
 
 
 class ChildProcessTests(unittest.TestCase):

@@ -43,7 +43,13 @@ class DevComposeTests(unittest.TestCase):
             self.assertEqual("host", service["network_mode"])
 
     def test_api_has_reload_and_single_worker(self) -> None:
+        service = self.config["services"]["api-dev"]
+        build = service["build"]
         environment = self.config["services"]["api-dev"]["environment"]
+        self.assertEqual("development", build["target"])
+        self.assertEqual(["python", "/app/scripts/dev_watch.py", "api"], service["entrypoint"])
+        self.assertEqual("go", environment["GROK2API_RUNTIME"])
+        self.assertEqual("/tmp/grok2api-migrate-dev", environment["GROK2API_MIGRATE_BIN"])
         self.assertEqual("0.0.0.0", environment["GROK2API_HOST"])
         self.assertEqual("40081", environment["GROK2API_PORT"])
         self.assertEqual(

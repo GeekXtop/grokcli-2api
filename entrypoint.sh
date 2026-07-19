@@ -8,18 +8,7 @@ cd /app
 
 runtime="$(echo "${GROK2API_RUNTIME:-go}" | tr '[:upper:]' '[:lower:]')"
 case "${runtime}" in
-  go|"")
-    if [[ ! -x /app/bin/grok2api && -x ./bin/grok2api ]]; then
-      APP_CMD=("./bin/grok2api")
-    else
-      APP_CMD=("/app/bin/grok2api")
-    fi
-    if [[ ! -x "${APP_CMD[0]}" ]]; then
-      echo "[entrypoint] ERROR: Go binary ${APP_CMD[0]} not found/executable" >&2
-      exit 2
-    fi
-    runtime=go
-    ;;
+  go|"") runtime=go ;;
   python)
     echo "[entrypoint] ERROR: GROK2API_RUNTIME=python is removed; only Go main + Python sidecar remain" >&2
     echo "[entrypoint] set GROK2API_RUNTIME=go (default) and keep registration/captcha sidecars" >&2
@@ -30,6 +19,7 @@ case "${runtime}" in
     exit 2
     ;;
 esac
+custom_cmd=0
 if [[ "$#" -gt 0 ]]; then
   # Ignore legacy `python app.py` CMD leftovers from older images/docs.
   if [[ "$#" -eq 2 && "$1" == "python" && "$2" == "app.py" ]]; then
@@ -38,6 +28,18 @@ if [[ "$#" -gt 0 ]]; then
     :
   else
     APP_CMD=("$@")
+    custom_cmd=1
+  fi
+fi
+if [[ "$custom_cmd" -eq 0 ]]; then
+  if [[ ! -x /app/bin/grok2api && -x ./bin/grok2api ]]; then
+    APP_CMD=("./bin/grok2api")
+  else
+    APP_CMD=("/app/bin/grok2api")
+  fi
+  if [[ ! -x "${APP_CMD[0]}" ]]; then
+    echo "[entrypoint] ERROR: Go binary ${APP_CMD[0]} not found/executable" >&2
+    exit 2
   fi
 fi
 

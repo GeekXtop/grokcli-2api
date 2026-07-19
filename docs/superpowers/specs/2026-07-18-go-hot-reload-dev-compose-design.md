@@ -8,9 +8,9 @@ from a Python main process to a Go main process.
 ## Scope
 
 The change covers the root multi-stage `Dockerfile`, `compose.dev.yml`,
-`scripts/dev_watch.py`, and focused tests. It preserves the existing solver and
-asset watchers, GitHub build secret, host networking, source bind mount, and
-registration/SSO sidecar behavior.
+`scripts/dev_watch.py`, `entrypoint.sh`, and focused tests. It preserves the
+existing solver and asset watchers, GitHub build secret, host networking,
+source bind mount, and registration/SSO sidecar behavior.
 
 ## Architecture
 
@@ -53,6 +53,10 @@ change instead of entering a rapid restart loop.
 
 SIGTERM and SIGINT stop the current API process group before the watcher exits.
 
+`entrypoint.sh` selects an explicit command argument before validating the
+image-default `/app/bin/grok2api`. This allows the watcher-provided `/tmp`
+binary to run even though the source bind mount hides `/app/bin`.
+
 ## Compose Changes
 
 `api-dev` will:
@@ -75,6 +79,8 @@ Tests will verify:
 - Compose selects `development`, Go runtime, and API watcher mode;
 - the watcher produces the expected Go build and entrypoint commands;
 - failed builds do not start a replacement child;
+- the entrypoint accepts the watcher-provided binary before checking the
+  image-default binary;
 - existing solver, asset, Compose, and Camoufox tests still pass.
 
 After unit tests, rebuild the development image using the GitHub BuildKit

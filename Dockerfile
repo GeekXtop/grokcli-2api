@@ -10,7 +10,7 @@ COPY internal ./internal
 RUN go build -o /out/grok2api ./cmd/grok2api \
     && go build -o /out/grok2api-migrate ./cmd/grok2api-migrate
 
-FROM python:3.12-slim-bookworm
+FROM python:3.12-slim-bookworm AS runtime-base
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
@@ -132,4 +132,12 @@ EXPOSE 3000 5072
 VOLUME ["/app/data"]
 
 ENTRYPOINT ["/app/entrypoint.sh"]
+
+FROM runtime-base AS development
+COPY --from=go-builder /usr/local/go /usr/local/go
+COPY --from=go-builder /go /go
+ENV PATH=/usr/local/go/bin:${PATH} \
+    GOPATH=/go
+
+FROM runtime-base AS production
 CMD ["/app/bin/grok2api"]

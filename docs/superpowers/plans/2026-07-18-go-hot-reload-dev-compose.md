@@ -108,6 +108,8 @@ Run the command from Step 2 and expect all tests to pass.
 **Files:**
 - Modify: `tests/test_dev_watch.py`
 - Modify: `scripts/dev_watch.py`
+- Create: `tests/test_entrypoint.py`
+- Modify: `entrypoint.sh`
 
 **Interfaces:**
 - `api_build_commands(go: str = "go") -> list[list[str]]`
@@ -177,6 +179,10 @@ if len(sys.argv) != 2 or sys.argv[1] not in {"api", "solver", "assets"}:
     return 2
 ```
 
+Move explicit command selection in `entrypoint.sh` before validation of the
+default `/app/bin/grok2api`. Add a regression test asserting this ordering so
+the `/tmp/grok2api-dev` command remains valid under the source bind mount.
+
 - [ ] **Step 4: Run watcher and related tests and verify GREEN**
 
 Run:
@@ -240,8 +246,9 @@ git status --short
 Then commit the scoped source and test changes:
 
 ```bash
-git add Dockerfile compose.dev.yml scripts/dev_watch.py \
+git add Dockerfile compose.dev.yml entrypoint.sh scripts/dev_watch.py \
   tests/test_dockerfile.py tests/test_dev_compose.py tests/test_dev_watch.py \
+  tests/test_entrypoint.py \
   docs/superpowers/specs/2026-07-18-go-hot-reload-dev-compose-design.md \
   docs/superpowers/plans/2026-07-18-go-hot-reload-dev-compose.md
 git commit -m "fix(dev): restore Go API hot reload"

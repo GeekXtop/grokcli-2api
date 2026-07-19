@@ -17,15 +17,17 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
+      target: development
       secrets:
         - github_token
     container_name: grokcli-2api-api-dev
     environment:
-      GROK2API_RUNTIME: python
+      GROK2API_RUNTIME: go
+      GROK2API_MIGRATE_BIN: /tmp/grok2api-migrate-dev
       GROK2API_RELOAD: "1"
       GROK2API_WORKERS: "1"
       GROK2API_INLINE_SOLVER: "0"
-    entrypoint: ["python", "/app/app.py"]
+    entrypoint: ["python", "/app/scripts/dev_watch.py", "api"]
     healthcheck:
       test:
         - CMD-SHELL

@@ -30,6 +30,19 @@ class DockerfileTests(unittest.TestCase):
             dockerfile,
         )
 
+    def test_development_target_includes_go_toolchain_and_production_is_default(self) -> None:
+        dockerfile = (ROOT / "Dockerfile").read_text()
+        self.assertIn(
+            "FROM python:3.12-slim-bookworm AS runtime-base",
+            dockerfile,
+        )
+        self.assertIn("FROM runtime-base AS development", dockerfile)
+        self.assertIn(
+            "COPY --from=go-builder /usr/local/go /usr/local/go",
+            dockerfile,
+        )
+        self.assertIn("FROM runtime-base AS production\nCMD", dockerfile)
+
 
 if __name__ == "__main__":
     unittest.main()
