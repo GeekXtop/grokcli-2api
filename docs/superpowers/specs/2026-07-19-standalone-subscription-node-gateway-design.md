@@ -1,419 +1,342 @@
-# Standalone Subscription Node Gateway Design
+# 独立订阅节点网关设计
 
-## Goal
+## 目标
 
-Build a separately deployed LAN subscription-node gateway that converts selected
-airport nodes into stable, standard SOCKS5 endpoints. One gateway instance serves
-multiple LAN clients, so consumers such as `grokcli-2api` do not need to understand
-VMess, VLESS, Trojan, Shadowsocks, or Hysteria2 and do not need to run their own
-protocol client.
+构建一个可单独部署在局域网中的订阅节点网关，把用户选中的机场节点转换为稳定、标准的 SOCKS5 代理端口。一台网关可供多台局域网设备共同使用，因此 `grokcli-2api` 等消费方不需要理解 VMess、VLESS、Trojan、Shadowsocks 或 Hysteria2，也不需要在每台设备上运行协议客户端。
 
-The project is independent from `grokcli-2api`. The existing
-`GeekXtop/multi-browser-manager` implementation is a behavioral reference for
-subscription parsing, proxy-pool management, sing-box outbound generation, and
-multi-inbound routing, but its Electron-specific runtime is not reused.
+本项目独立于 `grokcli-2api`。现有私有项目 `GeekXtop/multi-browser-manager` 作为订阅解析、代理池管理、sing-box outbound 生成以及多 inbound 路由的行为参考，但不复用其 Electron 运行时。
 
-## Product Scope
+## 产品范围
 
-The first release provides:
+第一版提供：
 
-- native Linux and Windows deployment;
-- a Go backend delivered as one application executable;
-- an embedded React administration interface;
-- a managed sing-box child process;
-- HTTP/HTTPS subscription URLs whose bodies contain URI lines or Base64-encoded
-  URI lines;
-- manual import of HTTP and SOCKS5 proxies;
-- manual and configurable scheduled subscription synchronization;
-- user-selected node activation;
-- one stable, editable LAN SOCKS5 port per activated node;
-- node testing, status display, filtering, and batch operations;
-- SQLite persistence;
-- an optional Linux Docker image.
+- Linux 与 Windows 原生部署；
+- Go 后端，最终交付为一个应用程序可执行文件；
+- 嵌入式 React 管理界面；
+- 由 Go 管理的 sing-box 子进程；
+- 通过 HTTP/HTTPS 订阅链接获取 URI 明文列表或 Base64 编码 URI 列表；
+- 手动导入 HTTP 和 SOCKS5 代理；
+- 手动同步和可配置的定时同步；
+- 用户自行选择要启用的节点；
+- 每个启用节点对应一个稳定且可编辑的局域网 SOCKS5 端口；
+- 节点测试、状态展示、筛选和批量操作；
+- SQLite 持久化；
+- 可选的 Linux Docker 镜像。
 
-The first release deliberately does not provide:
+第一版明确不包含：
 
-- Internet-facing deployment hardening;
-- administration login or API authentication;
-- SOCKS5 username/password authentication;
-- Clash YAML or sing-box JSON subscription parsing;
-- automatic selection, load balancing, or failover between nodes;
-- one sing-box process per node;
-- a requirement for Docker, Node.js, or Python on end-user machines.
+- 面向公网部署所需的安全加固；
+- 管理界面登录或 API 鉴权；
+- SOCKS5 用户名和密码认证；
+- Clash YAML 或 sing-box JSON 订阅解析；
+- 节点间的自动选择、负载均衡或故障转移；
+- 每个节点单独启动一个 sing-box 进程；
+- 要求最终用户安装 Docker、Node.js 或 Python。
 
-## Technology Choice
+## 技术选型
 
-### Backend
+### 后端
 
-Go owns the control plane:
+Go 负责控制面：
 
-- REST API and embedded static-file serving;
-- subscription download, decoding, parsing, and reconciliation;
-- SQLite access;
-- stable node identity and port allocation;
-- sing-box configuration generation and validation;
-- child-process lifecycle, readiness, restart, and rollback;
-- scheduled synchronization and serialized configuration application.
+- REST API 和嵌入式静态资源服务；
+- 订阅下载、解码、解析和节点对账；
+- SQLite 数据访问；
+- 稳定节点身份和端口分配；
+- sing-box 配置生成与校验；
+- 子进程启动、就绪检查、重启和回滚；
+- 定时同步和串行化配置应用。
 
-Go is selected for native Linux/Windows distribution, low-overhead long-running
-service behavior, networking and process-management support, and simple embedding
-of frontend assets. Go does not reimplement the airport transport protocols.
+选择 Go 是为了简化 Linux/Windows 原生发布，降低常驻服务开销，并利用其网络、并发、进程管理和静态资源嵌入能力。Go 不重新实现机场代理协议。
 
-### Frontend
+### 前端
 
-The administration interface uses React, TypeScript, and Vite. Development uses
-Node.js, but production builds do not require a Node.js runtime. Vite emits static
-assets into `web/dist`, and the Go application embeds those assets with `go:embed`
-and serves them from the same HTTP origin as the API.
+管理界面采用 React、TypeScript 和 Vite。开发阶段需要 Node.js，但生产环境不需要 Node.js 运行时。Vite 将静态资源构建到 `web/dist`，Go 使用 `go:embed` 将其打进可执行文件，并通过与 API 相同的 HTTP 服务和域名提供页面。
 
-Relevant presentation and interaction ideas may be adapted from
-`multi-browser-manager`, while Electron IPC is replaced by REST calls.
+界面样式、代理池交互和部分 React 组件思路可参考 `multi-browser-manager`，但 Electron IPC 全部替换为 REST API。
 
-### Data Plane
+### 数据面
 
-sing-box remains the protocol data plane. A single sing-box process contains one
-SOCKS inbound and one protocol outbound for every activated node. Routing binds
-each inbound tag to exactly one outbound tag, with the unmatched-route default set
-to `block` so configuration mistakes never fall back to the machine's direct
-connection.
+sing-box 负责所有真实代理协议流量。单个 sing-box 进程为每个已启用节点创建一个 SOCKS inbound 和一个协议 outbound，并通过路由将每个 inbound 严格绑定到对应 outbound。未命中的最终路由设为 `block`，避免配置错误时泄露真实直连出口。
 
-## Runtime Architecture
+## 运行架构
 
 ```text
-LAN browser / API client
-        |
-        +-- Web administration UI
-        +-- REST API
-        |
-        v
-Go gateway process
-  - subscriptions and parsers
-  - SQLite state
-  - node/port reconciliation
-  - sing-box config builder
-  - sing-box process supervisor
-        |
-        v
-One sing-box child process
-  0.0.0.0:22001 -> node A outbound
-  0.0.0.0:22002 -> node B outbound
-  0.0.0.0:22003 -> node C outbound
+局域网浏览器 / API 客户端
+        │
+        ├── Web 管理界面
+        └── REST API
+        │
+        ▼
+Go 网关进程
+  ├── 订阅下载与协议解析
+  ├── SQLite 状态存储
+  ├── 节点与端口对账
+  ├── sing-box 配置生成
+  └── sing-box 进程监管
+        │
+        ▼
+单个 sing-box 子进程
+  0.0.0.0:22001 → 节点 A outbound
+  0.0.0.0:22002 → 节点 B outbound
+  0.0.0.0:22003 → 节点 C outbound
 ```
 
-Both the management HTTP listener and activated SOCKS5 listeners are available to
-the LAN. Listen addresses, management port, and proxy-port range are configurable.
-The UI shows a visible warning that the application is running in LAN trust mode
-without authentication.
-
-## Persistence Model
-
-SQLite is the durable source of truth. The schema is organized around the
-following entities.
-
-### Settings
-
-- management listen address and port, defaulting to `0.0.0.0:18080`;
-- SOCKS listen address, defaulting to `0.0.0.0`;
-- automatic allocation range, defaulting to `22000-22999`;
-- advertised host used when presenting copyable proxy URLs;
-- sing-box executable path;
-- default subscription synchronization interval, defaulting to 30 minutes.
-
-### Subscription Sources
-
-- stable source ID;
-- name and URL;
-- enabled flag;
-- synchronization interval;
-- created and last-synchronized timestamps;
-- last result counts for imported, updated, removed, skipped, and invalid nodes;
-- last error summary.
-
-### Nodes
-
-- stable node ID;
-- optional subscription source ID, absent for manual imports;
-- display name and protocol;
-- normalized protocol configuration;
-- source identity metadata used during reconciliation;
-- activated flag;
-- optional durable local port;
-- current runtime status;
-- last test time, latency, exit IP, and error summary.
-
-Secrets such as subscription tokens, UUIDs, and proxy passwords remain available
-to the process because sing-box needs them, but they are not emitted into ordinary
-logs or public list responses unnecessarily.
-
-## Supported Inputs
-
-Subscription synchronization accepts an HTTP or HTTPS URL. The response is
-interpreted as either:
-
-1. newline-separated proxy URIs; or
-2. a Base64/Base64URL-encoded newline-separated proxy URI list.
-
-Initial node protocols are:
-
-- `vmess://`;
-- `vless://`;
-- `trojan://`;
-- `ss://`;
-- `hy2://` and `hysteria2://`;
-- `http://` and `https://` upstream proxies;
-- `socks5://` and `socks5h://` upstream proxies.
-
-If a URL returns Clash YAML, sing-box JSON, HTML, or another unsupported format,
-the synchronization result explicitly reports the unsupported format. It must not
-silently report success with zero nodes.
-
-Manual import accepts multi-line HTTP/HTTPS and SOCKS5/SOCKS5H proxy URLs and the
-credential shorthand already supported by the reference project's proxy import
-workflow where practical.
-
-## Subscription Reconciliation
-
-Synchronization is serialized so manual triggers and scheduled jobs cannot
-overwrite each other.
-
-The reconciliation flow is:
-
-1. Download with timeout, body-size, and redirect limits.
-2. Decode and parse all supported lines.
-3. Validate protocol-specific required fields.
-4. Match incoming nodes against existing nodes from the same subscription.
-5. Preserve stable node IDs, activation state, and local ports for matches.
-6. Insert unmatched incoming nodes as disabled nodes without allocated ports.
-7. Remove nodes absent from a successful, non-empty synchronization and release
-   their ports.
-8. Apply the new runtime configuration once for the complete synchronization.
-
-Matching first prefers an exact normalized configuration fingerprint. If the
-provider changes credentials or server details, a unique normalized node name
-within the same source may retain the existing node ID. Duplicate names are
-disambiguated with protocol, host, and port. Ambiguous matches become new nodes
-rather than risking transfer of an existing port to the wrong node.
-
-An empty response, download failure, unsupported document format, or a response
-from which no valid node can be parsed preserves the existing nodes.
-
-## Port Lifecycle
-
-- New nodes are disabled and have no port.
-- First activation allocates the first usable port from the configured range.
-- The allocation is persisted before being presented as available.
-- Deactivation stops listening but retains the assigned port.
-- Reactivation reuses the same port.
-- Users may edit a node's assigned port.
-- A requested port must be in range, unique in the database, and available to the
-  operating system.
-- Deleting a node releases its port.
-- Restarting the gateway never changes persisted port assignments.
-- A port conflict discovered later does not silently change a stable endpoint.
-  The node is marked with a port-conflict error and excluded from the active
-  sing-box candidate configuration so unaffected nodes can continue to run.
+管理 HTTP 端口和启用节点的 SOCKS5 端口都允许局域网访问。监听地址、管理端口和代理端口范围均可配置。界面必须明确提示当前处于无认证的“局域网信任模式”。
 
-The copy action presents an address such as
-`socks5://192.168.1.10:22001`. By default the host is derived from the browser's
-current gateway hostname; an advertised-host setting handles machines with
-multiple network interfaces or DNS names.
+## 持久化模型
 
-## sing-box Configuration
+SQLite 是持久化状态的唯一真源，数据按以下实体组织。
 
-Only activated, valid, conflict-free nodes are included in the generated
-configuration.
-
-For every included node, the gateway creates:
+### 系统设置
 
-- a SOCKS inbound listening on the configured LAN address and assigned port;
-- an outbound derived from the node protocol configuration;
-- a route from the inbound tag to the outbound tag.
+- 管理监听地址和端口，默认 `0.0.0.0:18080`；
+- SOCKS 监听地址，默认 `0.0.0.0`；
+- 自动分配端口范围，默认 `22000-22999`；
+- 复制代理地址时使用的对外展示主机名；
+- sing-box 可执行文件路径；
+- 默认订阅同步周期，默认 30 分钟。
 
-The generated configuration also contains a block outbound and uses it as the
-final route. No runtime error may cause transparent direct connection.
+### 订阅源
 
-The outbound builder supports protocol-specific requirements including UUIDs,
-passwords, Shadowsocks methods, TLS/SNI, Reality fields, uTLS fingerprint,
-WebSocket, HTTP/2, gRPC, HTTP Upgrade, QUIC transports, and Hysteria2 obfuscation
-fields when present in the input URI.
+- 稳定的订阅源 ID；
+- 名称和 URL；
+- 是否启用；
+- 同步周期；
+- 创建时间和最后同步时间；
+- 最近一次同步的新增、更新、删除、跳过和无效节点数量；
+- 最近一次错误摘要。
 
-## Configuration Application and Recovery
+### 节点
 
-All state-changing operations use a serialized application queue. A batch action
-or one subscription synchronization results in at most one sing-box reload.
-
-The application sequence is:
-
-1. Construct the candidate database state and sing-box configuration.
-2. Write the candidate configuration to a permission-restricted temporary file.
-3. Run `sing-box check -c <candidate>`.
-4. If validation fails, keep the current database state and running process.
-5. Stop the current process only after successful validation.
-6. Start the candidate process and verify all expected listener ports.
-7. Commit the related database transaction after readiness succeeds.
-8. If startup fails, restart the previous configuration and report the failed
-   operation to the UI.
-9. If the database commit fails after candidate readiness, stop the candidate,
-   restart the previous configuration, and return an error so runtime and durable
-   state cannot diverge.
+- 稳定的节点 ID；
+- 可选的订阅源 ID，手动导入节点没有订阅源；
+- 显示名称和协议；
+- 标准化后的协议配置；
+- 用于订阅对账的来源身份信息；
+- 是否启用；
+- 可选的持久化本地端口；
+- 当前运行状态；
+- 最近测试时间、延迟、出口 IP 和错误摘要。
 
-On an unexpected sing-box exit, the supervisor restarts it with increasing
-backoff. Repeated failures stop automatic retries and leave a persistent degraded
-status visible in the UI. Normal gateway shutdown terminates sing-box and removes
-temporary configuration files.
+订阅令牌、UUID 和代理密码等敏感内容必须供进程生成 sing-box 配置使用，但不得写入普通日志，也不得在不必要的列表接口中完整返回。
 
-## Administration Interface
+## 支持的输入
 
-### Overview
+订阅同步接收 HTTP 或 HTTPS URL，并将响应识别为：
 
-Shows:
+1. 每行一个节点的 URI 明文列表；或
+2. Base64/Base64URL 编码的多行 URI 列表。
 
-- gateway listen address;
-- sing-box installed/running/degraded status;
-- subscription count;
-- total node count;
-- activated and listening node counts;
-- configured proxy-port range;
-- LAN trust mode warning.
+第一版支持：
 
-### Subscriptions
+- `vmess://`；
+- `vless://`；
+- `trojan://`；
+- `ss://`；
+- `hy2://` 和 `hysteria2://`；
+- `http://` 和 `https://` 上游代理；
+- `socks5://` 和 `socks5h://` 上游代理。
 
-Supports creating, editing, deleting, enabling, disabling, and immediately
-synchronizing sources. Each source displays its schedule, last synchronization
-time, result counts, and last error.
+如果订阅链接返回 Clash YAML、sing-box JSON、HTML 或其他不支持的格式，同步结果必须明确提示格式不支持，不能静默显示“成功但导入零节点”。
 
-### Nodes
+手动导入支持多行 HTTP/HTTPS 和 SOCKS5/SOCKS5H 代理地址，并在合理范围内兼容参考项目已有的带凭据简写格式。
 
-The primary table contains:
+## 订阅同步与节点对账
 
-- node name, protocol, and source;
-- upstream server address;
-- availability, latency, and optional exit IP;
-- activated state;
-- assigned local SOCKS5 address;
-- actions for testing, copying, editing the port, and deleting.
+所有订阅同步任务必须串行执行，避免手动同步和定时任务并发覆盖结果。
 
-It supports source, protocol, and status filters, text search, and batch activate,
-deactivate, and test operations. New synchronized nodes remain disabled until the
-user selects them.
+同步流程：
 
-Single-node changes show an applying state while the configuration is reloaded.
-Batch changes submit one API operation and cause one reload. The first release
-uses short-interval status polling rather than WebSocket or SSE.
+1. 按超时、响应体大小和重定向次数限制下载订阅；
+2. 解码并解析所有支持的节点行；
+3. 校验各协议必填字段；
+4. 将新节点与同一订阅源的已有节点匹配；
+5. 匹配成功时保留节点 ID、启用状态和本地端口；
+6. 未匹配的新节点以禁用状态写入，并且不分配端口；
+7. 一次成功且非空的同步中，删除订阅里已经消失的节点并释放其端口；
+8. 整次同步只应用一次新的 sing-box 配置。
 
-### Manual Import
+节点匹配首先使用标准化完整配置指纹。机场修改密码或服务器信息时，如果同一订阅源内的标准化节点名称唯一，则可继续沿用已有节点 ID。名称重复时使用协议、主机和端口辅助区分。如果匹配结果存在歧义，则创建新节点，避免把已有端口错误转移给另一个节点。
 
-Provides a multi-line HTTP/SOCKS5 input, parsed preview, invalid-line reporting,
-and a confirmation step before insertion.
+遇到空响应、下载失败、不支持的文档格式，或者整份订阅没有解析出任何有效节点时，必须保留原有节点。
 
-### Settings
+## 端口生命周期
 
-Provides management and SOCKS listen addresses, management port, proxy-port
-range, advertised host, sing-box executable path, and default synchronization
-interval.
-
-## API Boundaries
-
-The same-origin REST API is grouped by responsibility:
-
-- `/api/status` for application and sing-box status;
-- `/api/settings` for runtime settings;
-- `/api/subscriptions` for source CRUD and synchronization;
-- `/api/nodes` for listing, filtering, testing, activation, port changes, and
-  deletion;
-- `/api/import` for manual proxy preview and commit.
-
-Bulk activation, deactivation, and testing are explicit batch endpoints so the
-backend can serialize changes and avoid one restart per selected row. The first
-release does not enable cross-origin requests.
-
-## Security Boundary
-
-The first release intentionally trusts the LAN and provides neither UI login nor
-SOCKS authentication. The interface must clearly communicate this behavior.
-
-Even in LAN trust mode:
-
-- subscription requests accept only HTTP/HTTPS;
-- request timeout, redirect count, and response size are bounded;
-- loopback, link-local, and private destination blocking is applied to remote
-  subscription URLs to reduce SSRF exposure;
-- API responses and logs avoid unnecessary secret disclosure;
-- generated configs and SQLite files use restrictive permissions where the host
-  OS supports them;
-- CORS is disabled and browser operations use the same origin;
-- unmatched sing-box traffic is blocked rather than sent directly.
-
-Authentication is a future extension and must be possible without changing node
-or port identities.
-
-## Deployment
-
-Native artifacts are the primary distribution:
-
-- Linux executable, optionally installed as a systemd service;
-- Windows executable, optionally installed as a Windows service;
-- frontend assets embedded in the executable;
-- sing-box located beside the application, in a configured data directory, or at
-  an explicitly configured path.
-
-Runtime data lives in a predictable application data directory containing SQLite,
-generated configs, and logs. Development may use a project-local data directory.
-
-An optional Linux Docker image packages the gateway and sing-box. Docker is not
-required. When used, the management port and selected SOCKS port range must be
-reachable from the LAN; native deployment avoids this port-publication complexity.
-
-## Testing Strategy
-
-### Go Unit Tests
-
-- URI and Base64 decoding fixtures for every supported protocol;
-- invalid and unsupported subscription handling;
-- node reconciliation and duplicate-name behavior;
-- stable ID, activation, and port preservation;
-- port allocation, manual override, collision, and release;
-- sing-box outbound and route generation;
-- secret redaction and request-limit behavior.
-
-### Go Integration Tests
-
-- SQLite transactions and migrations;
-- subscription synchronization through an HTTP fixture server;
-- candidate validation and rollback through a fake sing-box executable;
-- listener readiness, child exit, restart backoff, and shutdown;
-- Linux and Windows path/process abstractions where CI supports them.
-
-### Frontend Tests
-
-- subscription CRUD and synchronization results;
-- node filters and search;
-- single and batch activation;
-- port editing and conflict errors;
-- manual import preview and commit;
-- degraded sing-box and LAN trust warnings.
-
-### End-to-End Tests
-
-- start the gateway with a fake or real sing-box test fixture;
-- import nodes, activate selected nodes, and verify stable addresses;
-- restart the gateway and verify that ports are unchanged;
-- update a subscription and verify preserved mappings;
-- force a failed configuration and verify rollback;
-- validate the core flow on Linux and Windows CI runners.
-
-## Acceptance Criteria
-
-- A user can run the application natively on Linux or Windows and open the React
-  administration interface from another LAN device.
-- A user can add a URI/Base64 subscription and manually or automatically sync it.
-- A user can manually import HTTP/SOCKS5 proxies.
-- Newly imported nodes remain disabled.
-- Activating selected nodes creates one reachable LAN SOCKS5 endpoint per node.
-- Each node's endpoint remains stable across deactivation, reactivation,
-  subscription updates, and application restarts.
-- Users can change a node's port with clear validation feedback.
-- A malformed subscription or failed sing-box configuration does not delete the
-  previous working state.
-- No configuration error falls back to direct outbound traffic.
-- The production application requires neither Node.js nor Python.
+- 新节点默认禁用且没有端口；
+- 节点第一次启用时，从配置范围内选择第一个可用端口；
+- 端口分配成功后持久化，再向用户显示可用；
+- 禁用节点时停止监听，但保留已分配端口；
+- 再次启用时继续使用原端口；
+- 用户可以修改节点端口；
+- 用户指定的端口必须位于允许范围内、数据库中唯一，并且未被操作系统其他进程占用；
+- 删除节点时释放端口；
+- 网关重启不能改变已持久化的端口映射；
+- 后续发现端口冲突时不得静默更换稳定端口；该节点标记为“端口冲突”并从候选 sing-box 配置中排除，其余节点继续运行。
+
+复制操作生成类似 `socks5://192.168.1.10:22001` 的地址。默认使用浏览器当前访问网关时的主机名；对于多网卡或自定义 DNS 场景，可通过“对外展示主机名”设置覆盖。
+
+## sing-box 配置
+
+只有已启用、配置有效且没有端口冲突的节点进入生成配置。
+
+每个节点生成：
+
+- 一个监听局域网地址和分配端口的 SOCKS inbound；
+- 一个由节点协议配置生成的 outbound；
+- 一条从 inbound tag 到 outbound tag 的路由。
+
+配置中额外加入 `block` outbound，并将其设置为最终路由。任何运行错误都不能自动回退到直连。
+
+outbound 生成器需要支持 URI 中实际出现的协议字段，包括 UUID、密码、Shadowsocks 加密方法、TLS/SNI、Reality、uTLS 指纹、WebSocket、HTTP/2、gRPC、HTTP Upgrade、QUIC 以及 Hysteria2 混淆参数。
+
+## 配置应用与故障恢复
+
+所有会改变运行状态的操作通过同一个串行应用队列执行。一次批量操作或一次订阅同步最多触发一次 sing-box 重载。
+
+配置应用流程：
+
+1. 构建候选数据库状态和 sing-box 配置；
+2. 将候选配置写入权限受限的临时文件；
+3. 执行 `sing-box check -c <candidate>`；
+4. 校验失败时保留当前数据库状态和运行进程；
+5. 只有校验成功后才停止旧进程；
+6. 启动候选进程并验证所有预期监听端口；
+7. 就绪检查成功后提交相关数据库事务；
+8. 候选进程启动失败时，恢复上一份配置并向界面返回错误；
+9. 如果候选进程已就绪但数据库提交失败，则停止候选进程、恢复上一份配置并返回错误，避免运行状态与持久化状态不一致。
+
+sing-box 意外退出后，监管器采用递增退避自动重启。连续失败达到限制后停止自动重试，并在界面中保持明确的降级状态。网关正常退出时终止 sing-box，并删除临时配置文件。
+
+## 管理界面
+
+### 概览
+
+展示：
+
+- 网关监听地址；
+- sing-box 未安装、运行中或降级状态；
+- 订阅数量；
+- 节点总数；
+- 已启用和实际监听节点数量；
+- 代理端口范围；
+- 局域网信任模式警告。
+
+### 订阅管理
+
+支持新增、编辑、删除、启用、禁用和立即同步订阅。每个订阅显示同步周期、最近同步时间、结果统计和错误摘要。
+
+### 节点管理
+
+主表格包含：
+
+- 节点名称、协议和来源；
+- 上游服务器地址；
+- 可用性、延迟和可选出口 IP；
+- 启用状态；
+- 已分配的本地 SOCKS5 地址；
+- 测试、复制、编辑端口和删除操作。
+
+支持按订阅、协议和状态筛选，支持关键词搜索，以及批量启用、禁用和测试。订阅新同步出的节点保持禁用，必须由用户主动选择启用。
+
+单节点操作期间显示“正在应用”。批量操作使用一个 API 请求，后端只重载一次。第一版通过短周期轮询刷新状态，不引入 WebSocket 或 SSE。
+
+### 手动导入
+
+提供多行 HTTP/SOCKS5 输入框、解析预览、无效行提示和确认导入步骤。
+
+### 系统设置
+
+提供管理监听地址、SOCKS 监听地址、管理端口、代理端口范围、对外展示主机名、sing-box 路径和默认同步周期设置。
+
+## API 边界
+
+同源 REST API 按职责组织：
+
+- `/api/status`：应用和 sing-box 状态；
+- `/api/settings`：运行设置；
+- `/api/subscriptions`：订阅增删改查和同步；
+- `/api/nodes`：节点列表、筛选、测试、启用、端口修改和删除；
+- `/api/import`：手动代理预览和正式导入。
+
+批量启用、禁用和测试使用明确的批量接口，使后端能够串行应用变更，避免每选一行就重启一次。第一版不启用跨域访问。
+
+## 安全边界
+
+第一版明确采用局域网信任模型，不提供管理登录和 SOCKS 认证，界面必须持续提示这一行为。
+
+即使处于局域网信任模式，也必须做到：
+
+- 订阅请求只允许 HTTP/HTTPS；
+- 限制请求超时、重定向次数和响应体大小；
+- 远程订阅 URL 阻止访问回环、链路本地和私有地址，降低 SSRF 风险；
+- API 响应和日志避免不必要地泄露敏感信息；
+- 在操作系统允许的范围内，为 SQLite 和生成配置设置严格文件权限；
+- 禁用 CORS，浏览器操作全部同源；
+- sing-box 未匹配流量必须阻断而不是直连。
+
+未来增加认证时，不得改变现有节点 ID 或端口映射。
+
+## 部署方式
+
+原生程序是主要交付形式：
+
+- Linux 可执行文件，可选安装为 systemd 服务；
+- Windows 可执行文件，可选安装为 Windows 服务；
+- React 静态资源嵌入可执行文件；
+- sing-box 可放在应用程序旁、运行数据目录或用户显式配置的路径。
+
+运行数据位于可预测的应用数据目录，其中包含 SQLite、生成配置和日志；开发环境可以使用项目内数据目录。
+
+可选 Linux Docker 镜像同时包含网关和 sing-box，但 Docker 不是必需条件。使用 Docker 时，管理端口和选定的 SOCKS 端口范围必须能被局域网访问；原生部署不需要处理这一批量端口发布问题。
+
+## 测试策略
+
+### Go 单元测试
+
+- 所有支持协议的 URI 和 Base64 解码样例；
+- 无效订阅和不支持格式处理；
+- 节点对账和重名节点行为；
+- 稳定 ID、启用状态和端口保持；
+- 端口分配、手动覆盖、冲突和释放；
+- sing-box outbound 和路由生成；
+- 敏感信息脱敏和请求限制。
+
+### Go 集成测试
+
+- SQLite 事务和迁移；
+- 使用 HTTP 测试服务器执行订阅同步；
+- 使用假 sing-box 可执行文件验证配置校验和回滚；
+- 监听就绪、子进程退出、重启退避和正常关闭；
+- CI 能力允许时验证 Linux 和 Windows 路径与进程行为。
+
+### 前端测试
+
+- 订阅增删改查和同步结果；
+- 节点筛选和搜索；
+- 单个与批量启用；
+- 端口修改和冲突提示；
+- 手动导入预览和确认；
+- sing-box 降级状态和局域网信任警告。
+
+### 端到端测试
+
+- 使用假或真实 sing-box 测试夹具启动网关；
+- 导入节点、启用选定节点并验证稳定地址；
+- 重启网关后确认端口不变；
+- 更新订阅后确认已有映射被保留；
+- 强制制造配置失败并确认成功回滚；
+- 在 Linux 和 Windows CI 运行核心流程。
+
+## 验收标准
+
+- 用户可以在 Linux 或 Windows 原生运行程序，并从另一台局域网设备打开 React 管理界面；
+- 用户可以添加 URI/Base64 订阅，并手动或定时同步；
+- 用户可以手动导入 HTTP/SOCKS5 代理；
+- 新导入节点默认禁用；
+- 启用选定节点后，每个节点产生一个局域网可访问的 SOCKS5 端口；
+- 节点端口在禁用、重新启用、订阅更新和应用重启后保持不变；
+- 用户可以修改节点端口，并获得清晰的校验反馈；
+- 错误订阅或失败的 sing-box 配置不能破坏上一份可用状态；
+- 任何配置错误都不能导致流量回退到真实直连；
+- 生产环境不需要 Node.js 或 Python。
