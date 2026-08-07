@@ -1,0 +1,20 @@
+services:
+  api-dev:
+    image: grokcli-2api:dev
+    pull_policy: never
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: development
+      secrets:
+        - github_token
+  solver-dev:
+    image: grokcli-2api:dev
+    pull_policy: never
+  assets-dev:
+    image: grokcli-2api:dev
+    pull_policy: never
+
+secrets:
+  github_token:
+    environment: GITHUB_TOKEN

@@ -14,6 +14,9 @@ class DevComposeTests(unittest.TestCase):
     def setUpClass(cls) -> None:
         env = dict(os.environ)
         env["GROK2API_ENV_FILE"] = ".env.dev.example"
+        # Exercise the documented default image even if a developer has a
+        # local override in their shell environment.
+        env.pop("GROK2API_DEV_IMAGE", None)
         result = subprocess.run(
             [
                 "docker",
@@ -32,6 +35,75 @@ class DevComposeTests(unittest.TestCase):
         )
         cls.config = json.loads(result.stdout)
 
+        overlay_env = dict(env)
+        overlay_env["GITHUB_TOKEN"] = "test-token"
+        overlay_result = subprocess.run(
+            [
+                "docker",
+                "compose",
+                "-f",
+                "compose.dev.yml",
+                "-f",
+                "compose.dev.local.yml",
+                "config",
+                "--format",
+                "json",
+            ],
+            cwd=ROOT,
+            env=overlay_env,
+            text=True,
+            capture_output=True,
+            check=True,
+        )
+        cls.overlay_config = json.loads(overlay_result.stdout)
+
+    def test_default_uses_ghcr_without_build_or_secret(self):
+        for service in self.config["services"].values():
+            self.assertEqual("ghcr.io/geekxtop/grokcli-2api:dev", service["image"])
+            self.assertEqual("always", service["pull_policy"])
+            self.assertNotIn("build", service)
+        self.assertNotIn("secrets", self.config)
+
+    def test_source_mount_and_watchers_remain_enabled(self):
+        for service in self.config["services"].values():
+            self.assertTrue(
+                any(
+                    volume == ".:/app"
+                    or (
+                        isinstance(volume, dict)
+                        and volume.get("target") == "/app"
+                        and volume.get("source")
+                        and Path(volume.get("source", "")).resolve() == ROOT.resolve()
+                    )
+                    for volume in service["volumes"]
+                )
+            )
+        self.assertEqual(
+            ["python", "/app/scripts/dev_watch.py", "api"],
+            self.config["services"]["api-dev"]["entrypoint"],
+        )
+
+    def test_local_overlay_uses_prebuilt_image_and_only_api_builds(self):
+        services = self.overlay_config["services"]
+        for service in services.values():
+            self.assertEqual("grokcli-2api:dev", service["image"])
+            self.assertEqual("never", service["pull_policy"])
+
+        self.assertEqual(
+            {"api-dev"},
+            {name for name, service in services.items() if "build" in service},
+        )
+        self.assertEqual(
+            ROOT.resolve(), Path(services["api-dev"]["build"]["context"]).resolve()
+        )
+        self.assertEqual("Dockerfile", services["api-dev"]["build"]["dockerfile"])
+        self.assertEqual("development", services["api-dev"]["build"]["target"])
+        self.assertEqual([{"source": "github_token"}], services["api-dev"]["build"]["secrets"])
+        self.assertEqual(
+            "GITHUB_TOKEN",
+            self.overlay_config["secrets"]["github_token"]["environment"],
+        )
+
     def test_only_development_services_are_defined(self) -> None:
         self.assertEqual(
             {"api-dev", "solver-dev", "assets-dev"},
@@ -44,9 +116,7 @@ class DevComposeTests(unittest.TestCase):
 
     def test_api_has_reload_and_single_worker(self) -> None:
         service = self.config["services"]["api-dev"]
-        build = service["build"]
         environment = self.config["services"]["api-dev"]["environment"]
-        self.assertEqual("development", build["target"])
         self.assertEqual(["python", "/app/scripts/dev_watch.py", "api"], service["entrypoint"])
         self.assertEqual("go", environment["GROK2API_RUNTIME"])
         self.assertEqual("/tmp/grok2api-migrate-dev", environment["GROK2API_MIGRATE_BIN"])
@@ -64,22 +134,6 @@ class DevComposeTests(unittest.TestCase):
         environment = self.config["services"]["solver-dev"]["environment"]
         self.assertEqual("127.0.0.1", environment["TURNSTILE_HOST"])
         self.assertEqual("5072", environment["TURNSTILE_PORT"])
-
-    def test_only_api_service_builds_the_shared_image(self) -> None:
-        services_with_build = {
-            name
-            for name, service in self.config["services"].items()
-            if "build" in service
-        }
-        self.assertEqual({"api-dev"}, services_with_build)
-
-    def test_api_build_reads_github_token_as_a_secret(self) -> None:
-        build = self.config["services"]["api-dev"]["build"]
-        self.assertEqual([{"source": "github_token"}], build["secrets"])
-        self.assertEqual(
-            "GITHUB_TOKEN",
-            self.config["secrets"]["github_token"]["environment"],
-        )
 
     def test_env_example_is_not_ignored(self) -> None:
         result = subprocess.run(
