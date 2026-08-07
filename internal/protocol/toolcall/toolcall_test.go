@@ -187,12 +187,12 @@ func TestUpdateSearchReplaceAliases(t *testing.T) {
 	if parsed["file_path"] != "/x.go" || parsed["old_string"] != "old code" || parsed["new_string"] != "new code" {
 		t.Fatalf("parsed=%#v from %s", parsed, got)
 	}
-	// Grep must keep search → query, not old_string.
+	// Grep uses Claude Code's required pattern key, not the edit old_string key.
 	g := NormalizeJSON(`{"search":"TODO","path":"."}`, "Grep")
 	var gparsed map[string]any
 	_ = json.Unmarshal([]byte(g), &gparsed)
-	if gparsed["query"] != "TODO" {
-		t.Fatalf("grep search should map to query: %s", g)
+	if gparsed["pattern"] != "TODO" {
+		t.Fatalf("grep search should map to pattern: %s", g)
 	}
 	if _, ok := gparsed["old_string"]; ok {
 		t.Fatalf("grep must not become edit: %s", g)
@@ -641,7 +641,7 @@ func TestShellArgvBecomesString(t *testing.T) {
 		{`{"command":["ls","-la"]}`, "ls -la"},
 		{`{"cmd":["echo","hi"]}`, "echo hi"},
 		{`{"command":[["pwd"]]}`, "pwd"},
-		{`{"command":["git","commit","-m","hello world"]}`, "git commit -m 'hello world'"},
+		{`{"command":["git","commit","-m","hello world"]}`, `git commit -m "hello world"`},
 		{`{"command":"echo hi"}`, "echo hi"},
 	}
 	for _, tc := range cases {
@@ -694,7 +694,7 @@ func TestShellArgvForcedToString(t *testing.T) {
 		{"nested_array", `{"command":[["echo","hi"]]}`, "echo hi"},
 		{"cmd_array", `{"cmd":["pwd"]}`, "pwd"},
 		{"string_ok", `{"command":"echo hi"}`, "echo hi"},
-		{"space_quote", `{"command":["echo","hello world"]}`, "echo 'hello world'"},
+		{"space_quote", `{"command":["echo","hello world"]}`, `echo "hello world"`},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -762,7 +762,7 @@ func TestShellArgvAlwaysString(t *testing.T) {
 		{"array", `{"command":["ls","-la"]}`, "ls -la"},
 		{"nested", `{"command":[["echo","hi"]]}`, "echo hi"},
 		{"cmd array", `{"cmd":["pwd"]}`, "pwd"},
-		{"space token", `{"command":["echo","hello world"]}`, "echo 'hello world'"},
+		{"space token", `{"command":["echo","hello world"]}`, `echo "hello world"`},
 		{"string ok", `{"command":"date"}`, "date"},
 		{"json encoded argv string", `{"command":"[\"ls\",\"-la\"]"}`, "ls -la"},
 	}
@@ -819,7 +819,7 @@ func TestShellArgvArrayBecomesString(t *testing.T) {
 		{"array two", `{"command":["echo","hi"]}`, "echo hi"},
 		{"nested empty junk", `{"command":[["ls","-la"]]}`, "ls -la"},
 		{"cmd array", `{"cmd":["pwd"]}`, "pwd"},
-		{"json string argv", `{"command":"[\"echo\",\"x y\"]"}`, "echo 'x y'"},
+		{"json string argv", `{"command":"[\"echo\",\"x y\"]"}`, `echo "x y"`},
 		{"already string", `{"command":"date"}`, "date"},
 	}
 	for _, tc := range cases {
@@ -872,7 +872,7 @@ func TestShellArgvAlwaysStringForCodex(t *testing.T) {
 		{`{"command":["ls","-la"]}`, "ls -la"},
 		{`{"cmd":["echo","hi"]}`, "echo hi"},
 		{`{"command":[["pwd"]]}`, "pwd"},
-		{`{"command":["git","commit","-m","hello world"]}`, "git commit -m 'hello world'"},
+		{`{"command":["git","commit","-m","hello world"]}`, `git commit -m "hello world"`},
 		{`{"command":"already string"}`, "already string"},
 	}
 	for _, tc := range cases {
