@@ -743,7 +743,7 @@ Expected: API、solver、assets 运行且健康；首次 API 日志包含 `using
 
 - [ ] **Step 5: 验证本地 Go 热修改和失败保护**
 
-只触碰 `internal/buildinfo/buildinfo.go` 的 mtime，确认不发生内容重编译；再加入可编译注释并 `touch`，观察 `source differs; building Go API` 和 `restarting Go API`，检查健康端点。随后在临时工作副本注入语法错误，确认日志有 `Go build failed; keeping current API` 且旧 `/health` 仍为 200；恢复文件后确认下一次构建成功。故意的错误不得提交。
+对 `internal/buildinfo/buildinfo.go` 执行 `touch`，确认 watcher 记录源码变化并出现 `source differs; building Go API`、成功重编译和 `restarting Go API`，随后检查健康端点恢复 200；源码指纹用于启动时复用预编译程序，watcher 的 mtime/size 快照仍负责运行中变更检测。再在临时工作副本注入语法错误，确认日志有 `Go build failed; keeping current API` 且旧 `/health` 仍为 200；恢复文件后确认下一次构建成功。故意的错误不得提交。
 
 - [ ] **Step 6: 验证 SHA 回滚和卷保留**
 
