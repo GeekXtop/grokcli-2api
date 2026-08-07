@@ -27,13 +27,17 @@ PREBUILT_ARTIFACT_ROOT = Path("/opt/grok2api-dev")
 def snapshot(
     paths: Sequence[Path], suffixes: tuple[str, ...]
 ) -> dict[str, tuple[int, int]]:
+    """Capture mtime/size for files matching a suffix or exact filename."""
+
     state: dict[str, tuple[int, int]] = {}
     for root in paths:
         if not root.exists():
             continue
         candidates = [root] if root.is_file() else root.rglob("*")
         for path in candidates:
-            if not path.is_file() or path.suffix not in suffixes:
+            if not path.is_file():
+                continue
+            if path.suffix not in suffixes and path.name not in suffixes:
                 continue
             try:
                 stat = path.stat()
@@ -150,7 +154,11 @@ def build_api_binaries(
             pass
     succeeded = True
     for command in commands or api_build_commands():
-        result = subprocess.run(command, cwd=cwd, check=False)
+        try:
+            result = subprocess.run(command, cwd=cwd, check=False)
+        except OSError:
+            succeeded = False
+            break
         if result.returncode != 0:
             succeeded = False
             break
@@ -255,7 +263,7 @@ def run_api() -> int:
         ROOT / "go.sum",
         ROOT / ".release-commit",
     ]
-    suffixes = (".go", ".mod", ".sum", ".commit")
+    suffixes = (".go", ".mod", ".sum", ".release-commit")
     state = snapshot(paths, suffixes)
     child: subprocess.Popen[bytes] | None = None
     active_main = API_BINARY

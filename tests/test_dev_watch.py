@@ -52,6 +52,22 @@ class SnapshotTests(unittest.TestCase):
 
             self.assertNotEqual(before, snapshot([root], (".py",)))
 
+    def test_snapshot_tracks_exact_filename_entries(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            marker = root / ".release-commit"
+            marker.write_text("old")
+            before = snapshot([root], (".go", ".release-commit"))
+
+            marker.write_text("new-value")
+            os.utime(marker, None)
+            changed = snapshot([root], (".go", ".release-commit"))
+
+            self.assertIn(str(marker), before)
+            self.assertNotEqual(before, changed)
+            marker.unlink()
+            self.assertNotEqual(changed, snapshot([root], (".go", ".release-commit")))
+
 
 class SolverCommandTests(unittest.TestCase):
     def test_solver_command_uses_environment(self) -> None:
@@ -342,6 +358,62 @@ class ApiWatcherTests(unittest.TestCase):
                                 "./cmd/grok2api-migrate",
                             ],
                         ],
+                        cwd=root,
+                    )
+                )
+
+            self.assertEqual("old-main", main.read_text())
+            self.assertEqual("old-migrate", migrate.read_text())
+
+    def test_unavailable_go_command_is_a_failed_build(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            main = root / "main"
+            migrate = root / "migrate"
+            main_next = root / "main.next"
+            migrate_next = root / "migrate.next"
+            main.write_text("old-main")
+            migrate.write_text("old-migrate")
+
+            with patch("scripts.dev_watch.API_BINARY", main), patch(
+                "scripts.dev_watch.API_MIGRATE_BINARY", migrate
+            ), patch("scripts.dev_watch.API_BINARY_NEXT", main_next), patch(
+                "scripts.dev_watch.API_MIGRATE_BINARY_NEXT", migrate_next
+            ), patch(
+                "scripts.dev_watch.subprocess.run",
+                side_effect=FileNotFoundError("go not found"),
+            ):
+                self.assertFalse(
+                    build_api_binaries(
+                        commands=[["go", "build", "./cmd/grok2api"]],
+                        cwd=root,
+                    )
+                )
+
+            self.assertEqual("old-main", main.read_text())
+            self.assertEqual("old-migrate", migrate.read_text())
+
+    def test_permission_denied_go_command_is_a_failed_build(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            main = root / "main"
+            migrate = root / "migrate"
+            main_next = root / "main.next"
+            migrate_next = root / "migrate.next"
+            main.write_text("old-main")
+            migrate.write_text("old-migrate")
+
+            with patch("scripts.dev_watch.API_BINARY", main), patch(
+                "scripts.dev_watch.API_MIGRATE_BINARY", migrate
+            ), patch("scripts.dev_watch.API_BINARY_NEXT", main_next), patch(
+                "scripts.dev_watch.API_MIGRATE_BINARY_NEXT", migrate_next
+            ), patch(
+                "scripts.dev_watch.subprocess.run",
+                side_effect=PermissionError("go is not executable"),
+            ):
+                self.assertFalse(
+                    build_api_binaries(
+                        commands=[["go", "build", "./cmd/grok2api"]],
                         cwd=root,
                     )
                 )
