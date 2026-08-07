@@ -31,6 +31,7 @@ docker-rebuild.local.sh
 
 # Local tooling / release pins
 .claude/
+.worktrees/
 # release pin tracked for CI version gate
 # .release-commit
 
