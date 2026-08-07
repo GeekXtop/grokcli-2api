@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -99,11 +100,18 @@ func TestChatFingerprintUsesExplicitConversation(t *testing.T) {
 	}
 }
 
-func TestChatFingerprintFallsBackToMessagesHash(t *testing.T) {
+func TestChatFingerprintFallsBackToStableSeed(t *testing.T) {
+	// Same first user message → same seed fingerprint (stable across multi-turn growth).
 	fp1 := ChatFingerprint(ChatRequest{Model: "grok", Raw: map[string]any{"messages": []any{map[string]any{"role": "user", "content": "hi"}}}})
-	fp2 := ChatFingerprint(ChatRequest{Model: "grok", Raw: map[string]any{"messages": []any{map[string]any{"role": "user", "content": "hi"}}}})
-	if fp1 == "" || fp1 != fp2 || !strings.HasPrefix(fp1, "chat:grok:messages:") {
-		t.Fatalf("unexpected fingerprints %q %q", fp1, fp2)
+	fp2 := ChatFingerprint(ChatRequest{Model: "grok", Raw: map[string]any{"messages": []any{
+		map[string]any{"role": "user", "content": "hi"},
+		map[string]any{"role": "assistant", "content": "yo"},
+	}}})
+	if fp1 == "" || fp1 != fp2 {
+		t.Fatalf("seed fingerprint unstable: %q vs %q", fp1, fp2)
+	}
+	if !strings.HasPrefix(fp1, "chat:grok:seed:") {
+		t.Fatalf("expected seed fingerprint, got %q", fp1)
 	}
 }
 
@@ -461,10 +469,12 @@ func TestPrepareChainCapsFailover(t *testing.T) {
 }
 
 func TestGuardStreamAgainstEmptySlowFirstTokenPasses(t *testing.T) {
-	// Slow TTFT: no frames within the 1s peek window must NOT be treated as empty.
+	// Slow TTFT: no frames within the peek budget must NOT be treated as empty.
+	// After budget, the guarded reader must still deliver the late content
+	// (single-reader pump; no dual-read race dropping frames).
 	pr, pw := io.Pipe()
 	go func() {
-		time.Sleep(1200 * time.Millisecond)
+		time.Sleep(200 * time.Millisecond)
 		_, _ = pw.Write([]byte("data: {\"choices\":[{\"delta\":{\"content\":\"late\"}}]}\n\ndata: [DONE]\n\n"))
 		_ = pw.Close()
 	}()
@@ -478,7 +488,55 @@ func TestGuardStreamAgainstEmptySlowFirstTokenPasses(t *testing.T) {
 	if guarded == nil {
 		t.Fatal("expected reader")
 	}
-	_ = guarded.Close()
+	defer guarded.Close()
+	var got strings.Builder
+	err = grok.ReadSSE(guarded, func(event grok.Event) error {
+		if event.Done {
+			return nil
+		}
+		got.Write(event.Data)
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(got.String(), "late") {
+		t.Fatalf("slow first token content lost after peek budget: %q", got.String())
+	}
+}
+
+func TestGuardStreamAgainstEmptyDoesNotDualRead(t *testing.T) {
+	// Regression: returning raw body while peeker still scanned caused dual Read
+	// and intermittent empty 502 under medium thinking TTFT.
+	// Content arrives just after the peek budget; client must still see it.
+	pr, pw := io.Pipe()
+	go func() {
+		// Hollow keepalive-like frames first (usage-only / empty delta), then content.
+		_, _ = pw.Write([]byte("data: {\"choices\":[{\"delta\":{}}]}\n\n"))
+		time.Sleep(emptyStreamNoDataBudget + 30*time.Millisecond)
+		_, _ = pw.Write([]byte("data: {\"choices\":[{\"delta\":{\"content\":\"after-budget\"}}]}\n\ndata: [DONE]\n\n"))
+		_ = pw.Close()
+	}()
+	guarded, empty, err := guardStreamAgainstEmpty(pr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if empty {
+		t.Fatalf("must not treat delayed content as empty")
+	}
+	defer guarded.Close()
+	var got strings.Builder
+	if err := grok.ReadSSE(guarded, func(event grok.Event) error {
+		if !event.Done {
+			got.Write(event.Data)
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(got.String(), "after-budget") {
+		t.Fatalf("content after peek budget lost (dual-read race?): %q", got.String())
+	}
 }
 
 func TestChatFingerprintPrefersPromptCacheKey(t *testing.T) {
@@ -488,6 +546,54 @@ func TestChatFingerprintPrefersPromptCacheKey(t *testing.T) {
 	}})
 	if fp != "chat:grok:prompt_cache_key:stable-pck" {
 		t.Fatalf("fingerprint=%q", fp)
+	}
+}
+
+func TestChatFingerprintSeedStableAcrossTurns(t *testing.T) {
+	// OpenAI multi-turn without prompt_cache_key: fingerprint must NOT change as
+	// messages grow, or affinity breaks and upstream prefix cache always misses.
+	turn1 := ChatRequest{Model: "grok-4.5", Raw: map[string]any{
+		"messages": []any{
+			map[string]any{"role": "user", "content": "hello world please help"},
+		},
+	}}
+	turn2 := ChatRequest{Model: "grok-4.5", Raw: map[string]any{
+		"messages": []any{
+			map[string]any{"role": "user", "content": "hello world please help"},
+			map[string]any{"role": "assistant", "content": "sure"},
+			map[string]any{"role": "user", "content": "and then?"},
+		},
+	}}
+	fp1 := ChatFingerprint(turn1)
+	fp2 := ChatFingerprint(turn2)
+	if fp1 == "" || fp2 == "" {
+		t.Fatalf("empty fingerprint fp1=%q fp2=%q", fp1, fp2)
+	}
+	if fp1 != fp2 {
+		t.Fatalf("seed fingerprint changed across turns:\n  t1=%q\n  t2=%q", fp1, fp2)
+	}
+	if strings.Contains(fp1, ":messages:") {
+		t.Fatalf("must not use full-messages hash: %q", fp1)
+	}
+	if !strings.Contains(fp1, ":seed:") && !strings.Contains(fp1, "prompt_cache_key") {
+		t.Fatalf("expected seed or pck fingerprint, got %q", fp1)
+	}
+}
+
+func TestBindAffinityBindsSeedFingerprint(t *testing.T) {
+	store := &fakeAffinityStore{bound: map[string]string{}}
+	svc := &ChatService{AffinityStore: store}
+	req := ChatRequest{Model: "grok", Raw: map[string]any{
+		"messages": []any{map[string]any{"role": "user", "content": "sticky seed message"}},
+	}}
+	fp := ChatFingerprint(req)
+	if fp == "" {
+		t.Fatal("empty fingerprint")
+	}
+	svc.bindAffinity(context.Background(), req, "acc-seed")
+	if store.bound[fp] != "acc-seed" {
+		// bindAffinity prefers pck when present; seed path binds fingerprint.
+		t.Fatalf("seed fingerprint not bound: fp=%q bound=%#v", fp, store.bound)
 	}
 }
 
@@ -815,5 +921,253 @@ func TestChatToolAssemblerFeedFinishThenSoftDisconnect(t *testing.T) {
 	// Feed already finished; soft-disconnect flush must not duplicate finish_reason.
 	if term := a.FinishReasonFrame(); term != nil {
 		t.Fatalf("unexpected second terminal %#v", term)
+	}
+}
+
+func TestChatToolAssemblerSoftWriteRequeue(t *testing.T) {
+	a := NewChatToolStreamAssembler()
+	a.SetAllowedTools([]string{"Edit"})
+	raw := []byte(`{"id":"c1","model":"g","choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_1","type":"function","function":{"name":"Edit","arguments":"{\"file_path\":\"/x\",\"old_string\":\"a\",\"new_string\":\"b\"}"}}]},"finish_reason":null}]}`)
+	delta, err := ParseChatDelta(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	frames, passthrough := a.Feed(raw, delta)
+	if passthrough {
+		t.Fatal("expected non-passthrough tool frames")
+	}
+	if len(frames) == 0 {
+		t.Fatal("expected emitted tool frames")
+	}
+	// Soft write: not Ack'd
+	if !a.HasUnacked() {
+		t.Fatal("expected unacked after emit without Ack")
+	}
+	a.RequeueUnacked()
+	// Finish should re-emit
+	again := a.Finish()
+	if len(again) == 0 {
+		t.Fatal("Finish after requeue must re-emit tool frames")
+	}
+	// Ack success
+	encoded, _ := json.Marshal(again[0])
+	a.AckPayload(string(encoded))
+	// FinishReason + Ack
+	term := a.FinishReasonFrame()
+	if term == nil {
+		t.Fatal("expected finish_reason frame")
+	}
+	termEnc, _ := json.Marshal(term)
+	a.AckPayload(string(termEnc))
+	if a.NeedsFinishRetry() {
+		t.Fatal("no retry after full Ack")
+	}
+	if second := a.FinishReasonFrame(); second != nil {
+		t.Fatalf("idempotent FinishReasonFrame, got %#v", second)
+	}
+}
+
+func TestGuardStreamAgainstEmptyHollowThenDone(t *testing.T) {
+	// Hollow drips (empty delta) then [DONE] within hollow budget must be empty
+	// so OpenStream can failover before Anthropic message_start opens.
+	// This is the intermittent Claude Code high-effort empty-output path.
+	pr, pw := io.Pipe()
+	go func() {
+		// Immediate hollow frame (activity → hollow path, not pure silence).
+		_, _ = pw.Write([]byte("data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":1}}\n\n"))
+		time.Sleep(200 * time.Millisecond)
+		_, _ = pw.Write([]byte("data: [DONE]\n\n"))
+		_ = pw.Close()
+	}()
+	guarded, empty, err := guardStreamAgainstEmpty(pr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !empty {
+		t.Fatalf("hollow-then-done must be empty for failover, guarded=%v", guarded != nil)
+	}
+	if guarded != nil {
+		_ = guarded.Close()
+	}
+}
+
+func TestGuardStreamAgainstEmptyHollowThenContentIsLive(t *testing.T) {
+	// Hollow keepalive then real content within hollow budget must stay live.
+	pr, pw := io.Pipe()
+	go func() {
+		_, _ = pw.Write([]byte("data: {\"choices\":[{\"delta\":{}}]}\n\n"))
+		time.Sleep(150 * time.Millisecond)
+		_, _ = pw.Write([]byte("data: {\"choices\":[{\"delta\":{\"content\":\"hi\"}}]}\n\ndata: [DONE]\n\n"))
+		_ = pw.Close()
+	}()
+	guarded, empty, err := guardStreamAgainstEmpty(pr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if empty {
+		t.Fatal("hollow then content must be live")
+	}
+	defer guarded.Close()
+	var got strings.Builder
+	if err := grok.ReadSSE(guarded, func(event grok.Event) error {
+		if !event.Done {
+			got.Write(event.Data)
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(got.String(), "hi") {
+		t.Fatalf("content lost: %q", got.String())
+	}
+}
+
+func TestGuardStreamAgainstEmptySilenceThenDone(t *testing.T) {
+	// Pure silence then [DONE] within abs budget must be empty (failover).
+	// Matches Claude high-effort hollow empties that never send a model delta.
+	pr, pw := io.Pipe()
+	go func() {
+		time.Sleep(800 * time.Millisecond)
+		_, _ = pw.Write([]byte("data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n"))
+		_ = pw.Close()
+	}()
+	// Cap abs budget for test speed via short-circuit: we can't override const,
+	// so 800ms silence+done is well under 15s and must return empty.
+	started := time.Now()
+	guarded, empty, err := guardStreamAgainstEmpty(pr)
+	elapsed := time.Since(started)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !empty {
+		t.Fatalf("silence-then-done must be empty for failover (elapsed=%v)", elapsed)
+	}
+	if guarded != nil {
+		_ = guarded.Close()
+	}
+	// Should resolve near the 800ms write, not wait full 15s.
+	if elapsed > 5*time.Second {
+		t.Fatalf("took too long %v (should resolve soon after DONE)", elapsed)
+	}
+}
+
+func TestParseChatDeltaMultipartContent(t *testing.T) {
+	raw := []byte(`{"choices":[{"delta":{"content":[{"type":"text","text":"hello "},{"type":"output_text","text":"world"}]}}]}`)
+	d, err := ParseChatDelta(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if d.Content != "hello world" {
+		t.Fatalf("content=%q", d.Content)
+	}
+}
+
+func TestParseChatDeltaNestedResponseUsage(t *testing.T) {
+	raw := []byte(`{"response":{"usage":{"input_tokens":10,"output_tokens":20,"total_tokens":30}}}`)
+	d, err := ParseChatDelta(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	u, _ := d.Usage.(map[string]any)
+	if u == nil {
+		t.Fatal("usage nil")
+	}
+	if n, _ := u["output_tokens"].(float64); n != 20 {
+		t.Fatalf("usage=%v", u)
+	}
+}
+
+
+func TestGuardStreamAgainstEmptyHollowTimeoutIsEmpty(t *testing.T) {
+	// Continuous hollow frames with no [DONE] for longer than abs budget must
+	// be empty so OpenStream can failover (anthropic empty-output main path).
+	pr, pw := io.Pipe()
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		// Drip empty deltas for ~1s then stop writing (no DONE).
+		for i := 0; i < 20; i++ {
+			_, _ = pw.Write([]byte("data: {\"choices\":[{\"delta\":{}}]}\n\n"))
+			time.Sleep(50 * time.Millisecond)
+		}
+		// Keep connection open until peeker stops; then close.
+		time.Sleep(emptyStreamAbsBudget + 2*time.Second)
+		_ = pw.Close()
+	}()
+	// Use a shorter wait by relying on abs budget — test may be slow (~18s).
+	// Skip under -short.
+	if testing.Short() {
+		_ = pw.Close()
+		t.Skip("slow hollow timeout test")
+	}
+	started := time.Now()
+	guarded, empty, err := guardStreamAgainstEmpty(pr)
+	elapsed := time.Since(started)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !empty {
+		t.Fatalf("hollow timeout must be empty (elapsed=%v)", elapsed)
+	}
+	if guarded != nil {
+		_ = guarded.Close()
+	}
+	// Should resolve near abs budget, not hang until pipe close.
+	if elapsed > emptyStreamAbsBudget+3*time.Second {
+		t.Fatalf("took too long %v", elapsed)
+	}
+	_ = done
+}
+
+
+func TestShouldDropStickyPinClassifiesErrors(t *testing.T) {
+	// Transient transport must KEEP pin (return false).
+	for _, err := range []error{
+		context.DeadlineExceeded,
+		errors.New("i/o timeout while dialing"),
+		errors.New("connection reset by peer"),
+		&grok.UpstreamError{Status: 502, Body: "bad gateway"},
+		&grok.UpstreamError{Status: 0, Body: "upstream hung"},
+	} {
+		if shouldDropStickyPin(err) {
+			t.Fatalf("expected keep sticky for %v", err)
+		}
+	}
+	// Empty / auth must DROP pin (return true).
+	for _, err := range []error{
+		&grok.UpstreamError{Status: 502, Body: "Upstream returned HTTP 200 with empty model output (no content/tool_calls)"},
+		&grok.UpstreamError{Status: 401, Body: "unauthorized"},
+		&grok.UpstreamError{Status: 403, Body: "forbidden"},
+		errors.New("empty model output"),
+	} {
+		if !shouldDropStickyPin(err) {
+			t.Fatalf("expected drop sticky for %v", err)
+		}
+	}
+}
+
+func TestEnsureUpstreamCacheKeyFromRequestPCK(t *testing.T) {
+	body := map[string]any{"messages": []any{}}
+	req := ChatRequest{Model: "grok", Raw: map[string]any{"prompt_cache_key": "sess-xyz"}}
+	ensureUpstreamCacheKey(body, req)
+	if body["prompt_cache_key"] != "sess-xyz" {
+		t.Fatalf("pck not injected: %#v", body)
+	}
+	// Does not overwrite existing.
+	body2 := map[string]any{"prompt_cache_key": "keep-me"}
+	ensureUpstreamCacheKey(body2, req)
+	if body2["prompt_cache_key"] != "keep-me" {
+		t.Fatalf("overwrote existing pck: %#v", body2)
+	}
+}
+
+func TestEnsureUpstreamCacheKeyFromClaudeUser(t *testing.T) {
+	body := map[string]any{
+		"user": "user_abc_account__session_01234567-89ab-cdef-0123-456789abcdef",
+	}
+	ensureUpstreamCacheKey(body, ChatRequest{Model: "grok", Raw: map[string]any{}})
+	pck, _ := body["prompt_cache_key"].(string)
+	if !strings.HasPrefix(pck, "session_") {
+		t.Fatalf("expected session pck from user, got %q", pck)
 	}
 }

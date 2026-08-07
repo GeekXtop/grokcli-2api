@@ -38,6 +38,9 @@ var unsupportedUpstreamParams = map[string]bool{
 	"search_parameters":        true,
 	"web_search_options":       true,
 	"group":                    true,
+	// Client-only metadata (Codex session/client hints). Stripped after compact
+	// detection so LooksLikeCodexRequest can still see metadata.client.
+	"metadata": true,
 }
 
 func SanitizeUpstreamBody(body map[string]any) map[string]any {
@@ -89,7 +92,6 @@ func StabilizePromptBody(body map[string]any) map[string]any {
 		}
 		body["messages"] = stabilized
 	}
-	delete(body, "metadata")
 	body["_prompt_stabilize"] = stats
 	return stats
 }
@@ -108,10 +110,23 @@ func PrepareUpstreamBody(body map[string]any) map[string]any {
 }
 
 // PrepareUpstreamBodyDetailed returns the sanitized upstream body plus stabilize/compact stats.
-func PrepareUpstreamBodyDetailed(body map[string]any) (map[string]any, BodyPrepStats) {
+// Optional userAgent enables Codex default auto-compact when admin auto_chars is 0.
+//
+// Cache-safe body prep: stabilize + optional history compact, then strip
+// private keys. Do NOT inject client-specific instructions here — that would
+// mutate the prompt prefix and bust Grok prompt-cache hits. Codex detection
+// is used only for outbound shell key projection (cmd↔command), not for
+// rewriting instructions.
+func PrepareUpstreamBodyDetailed(body map[string]any, userAgent ...string) (map[string]any, BodyPrepStats) {
 	out := cloneAnyMap(body)
+	ua := ""
+	if len(userAgent) > 0 {
+		ua = userAgent[0]
+	}
+	// Intentionally no prompt injection (cache-safe). Codex shell key projection
+	// happens only on the outbound tool_call path.
 	stabilize := StabilizePromptBody(out)
-	compact := historycompact.Apply(out)
+	compact := historycompact.Apply(out, ua)
 	return SanitizeUpstreamBody(out), BodyPrepStats{Stabilize: stabilize, Compact: compact}
 }
 
@@ -476,7 +491,7 @@ func normalizeFunctionTool(tool map[string]any) map[string]any {
 		// Nudge description so the model sticks to the schema parameter name.
 		if isShellToolName(name) {
 			desc := stringFromAny(outFn["description"])
-			hint := " Argument is the shell command string or argv array."
+			hint := " Argument is a single shell command string."
 			if desc == "" {
 				outFn["description"] = "Run a shell command." + hint
 			} else if !strings.Contains(strings.ToLower(desc), `parameter name "command"`) && !strings.Contains(strings.ToLower(desc), "parameter name 'command'") {
@@ -497,7 +512,7 @@ func normalizeFunctionTool(tool map[string]any) map[string]any {
 	outFn["parameters"] = hardenShellToolParameters(name, outFn["parameters"])
 	if isShellToolName(name) {
 		desc := stringFromAny(outFn["description"])
-		hint := " Argument is the shell command string or argv array."
+		hint := " Argument is a single shell command string."
 		if desc == "" {
 			outFn["description"] = "Run a shell command." + hint
 		} else if !strings.Contains(strings.ToLower(desc), `parameter name "command"`) {
@@ -534,7 +549,10 @@ func hardenShellToolParameters(name string, params any) map[string]any {
 	} else {
 		props = cloneAnyMap(props)
 	}
-	// Keep existing command schema if present; otherwise define a clear string|array schema.
+	// Keep existing command schema if present; always force a single STRING type.
+	// Array argv was allowed historically but trained Grok to emit argv that then
+	// got POSIX-quoted for Codex PowerShell hosts (ParserError). String-only
+	// matches Codex Desktop local schema and the gold-standard gateway.
 	cmdSchema, _ := props["command"].(map[string]any)
 	if cmdSchema == nil {
 		// Steal description from common wrong names if any.
@@ -548,22 +566,21 @@ func hardenShellToolParameters(name string, params any) map[string]any {
 			}
 		}
 		if desc == "" {
-			desc = "Shell command as a single string (preferred) or argv array of strings."
+			desc = "Single shell command string to execute on the client host."
 		}
 		cmdSchema = map[string]any{
 			"description": desc,
-			// JSON Schema union as array of types is widely accepted.
-			"type":  []any{"string", "array"},
-			"items": map[string]any{"type": "string"},
+			"type":        "string",
 		}
 	} else {
 		cmdSchema = cloneAnyMap(cmdSchema)
-		// Ensure description mentions the required parameter name.
+		// Force string-only even if the client advertised string|array.
+		cmdSchema["type"] = "string"
+		delete(cmdSchema, "items")
 		d := stringFromAny(cmdSchema["description"])
-		if d == "" {
-			cmdSchema["description"] = "Shell command string or argv array of strings."
-		} else if !strings.Contains(strings.ToLower(d), "must be command") && !strings.Contains(strings.ToLower(d), "parameter name") {
-			cmdSchema["description"] = d
+		ld := strings.ToLower(d)
+		if d == "" || strings.Contains(ld, "argv") || strings.Contains(ld, "array") {
+			cmdSchema["description"] = "Single shell command string to execute on the client host."
 		}
 	}
 	// Rebuild properties: command first, then non-conflicting extras (workdir/timeout).

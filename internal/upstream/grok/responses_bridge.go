@@ -9,6 +9,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/hm2899/grokcli-2api/internal/protocol/reasoning"
 )
 
 // chatToResponsesPayload converts an OpenAI chat/completions-style body into a
@@ -113,6 +115,7 @@ func chatMessagesToResponsesInput(messages []any) []any {
 			if callID == "" {
 				callID = "call_go"
 			}
+			// Tool outputs may be empty strings; that is valid (not a content block).
 			out = append(out, map[string]any{
 				"type":    "function_call_output",
 				"call_id": callID,
@@ -124,22 +127,29 @@ func chatMessagesToResponsesInput(messages []any) []any {
 				for _, call := range calls {
 					out = append(out, call)
 				}
-				// Also keep assistant text if any.
-				if text := stringifyContent(msg["content"]); strings.TrimSpace(text) != "" {
-					out = append(out, responsesMessage("assistant", text))
+				// Also keep assistant text if any (skip empty — Empty content block).
+				if item := responsesMessageOrNil("assistant", msg["content"]); item != nil {
+					out = append(out, item)
 				}
 				continue
 			}
-			out = append(out, responsesMessage("assistant", msg["content"]))
+			if item := responsesMessageOrNil("assistant", msg["content"]); item != nil {
+				out = append(out, item)
+			}
 		case "system":
 			// CPA maps system → developer for cli-chat-proxy cache prefix stability.
-			out = append(out, responsesMessage("developer", msg["content"]))
+			// Never emit empty developer content blocks (upstream 400 Empty content block).
+			if item := responsesMessageOrNil("developer", msg["content"]); item != nil {
+				out = append(out, item)
+			}
 		case "user", "developer":
-			out = append(out, responsesMessage(role, msg["content"]))
+			if item := responsesMessageOrNil(role, msg["content"]); item != nil {
+				out = append(out, item)
+			}
 		default:
 			// Pass through unknown roles as user text when possible.
-			if text := stringifyContent(msg["content"]); strings.TrimSpace(text) != "" {
-				out = append(out, responsesMessage("user", text))
+			if item := responsesMessageOrNil("user", msg["content"]); item != nil {
+				out = append(out, item)
 			}
 		}
 	}
@@ -148,13 +158,52 @@ func chatMessagesToResponsesInput(messages []any) []any {
 
 // responsesMessage builds CPA-compatible Responses input message items:
 // {type:message, role, content:[{type:input_text|output_text, text}]}.
+// Deprecated for empty text — use responsesMessageOrNil.
 func responsesMessage(role string, content any) map[string]any {
+	if item := responsesMessageOrNil(role, content); item != nil {
+		return item
+	}
+	// Fallback for callers that still require a map: use a single space only when
+	// forced. Prefer responsesMessageOrNil and skip empty messages.
 	role = strings.ToLower(strings.TrimSpace(role))
 	partType := "input_text"
 	if role == "assistant" {
 		partType = "output_text"
 	}
-	text := stringifyContent(content)
+	return map[string]any{
+		"type": "message",
+		"role": role,
+		"content": []any{
+			map[string]any{"type": partType, "text": " "},
+		},
+	}
+}
+
+// responsesMessageOrNil returns nil when the message would have an empty content
+// block. cli-chat-proxy rejects {type:input_text|output_text, text:""} with
+// HTTP 400 "Empty content block" (Codex multi-turn / tool-only history).
+func responsesMessageOrNil(role string, content any) map[string]any {
+	role = strings.ToLower(strings.TrimSpace(role))
+	partType := "input_text"
+	if role == "assistant" {
+		partType = "output_text"
+	}
+	// Multi-part image content: preserve non-empty structured parts.
+	if parts, ok := content.([]any); ok && len(parts) > 0 {
+		normalized := normalizeResponsesContentParts(parts, partType)
+		if len(normalized) == 0 {
+			return nil
+		}
+		return map[string]any{
+			"type":    "message",
+			"role":    role,
+			"content": normalized,
+		}
+	}
+	text := strings.TrimSpace(stringifyContent(content))
+	if text == "" {
+		return nil
+	}
 	return map[string]any{
 		"type": "message",
 		"role": role,
@@ -162,6 +211,64 @@ func responsesMessage(role string, content any) map[string]any {
 			map[string]any{"type": partType, "text": text},
 		},
 	}
+}
+
+// normalizeResponsesContentParts drops empty text blocks and unknown empty
+// objects that trigger upstream "Empty content block".
+func normalizeResponsesContentParts(parts []any, defaultPartType string) []any {
+	out := make([]any, 0, len(parts))
+	for _, part := range parts {
+		switch p := part.(type) {
+		case string:
+			if strings.TrimSpace(p) == "" {
+				continue
+			}
+			out = append(out, map[string]any{"type": defaultPartType, "text": p})
+		case map[string]any:
+			typeName := strings.ToLower(strings.TrimSpace(firstString(p, "type")))
+			switch typeName {
+			case "", "text", "input_text", "output_text":
+				text := strings.TrimSpace(firstString(p, "text", "content"))
+				if text == "" {
+					continue
+				}
+				pt := defaultPartType
+				if typeName == "output_text" {
+					pt = "output_text"
+				} else if typeName == "input_text" || typeName == "text" || typeName == "" {
+					pt = defaultPartType
+				}
+				out = append(out, map[string]any{"type": pt, "text": text})
+			case "input_image", "image", "image_url":
+				// Preserve multimodal images for vision models. Normalize OpenAI
+				// chat {type:image_url,image_url:{url}} → Responses input_image.
+				url := imagePartURL(p)
+				if url == "" {
+					continue
+				}
+				part := map[string]any{
+					"type":      "input_image",
+					"image_url": url,
+				}
+				if img, ok := p["image_url"].(map[string]any); ok {
+					if d := firstString(img, "detail"); d != "" {
+						part["detail"] = d
+					}
+				}
+				if d := firstString(p, "detail"); d != "" {
+					part["detail"] = d
+				}
+				out = append(out, part)
+			default:
+				// Unknown part with no text: drop (common empty placeholder blocks).
+				if strings.TrimSpace(firstString(p, "text", "content")) == "" {
+					continue
+				}
+				out = append(out, p)
+			}
+		}
+	}
+	return out
 }
 
 func toolCallsFromMessage(msg map[string]any) []map[string]any {
@@ -320,6 +427,42 @@ func stringifyContent(value any) string {
 	}
 }
 
+// imagePartURL extracts a usable image URL from OpenAI/Anthropic/Responses shapes.
+func imagePartURL(p map[string]any) string {
+	if p == nil {
+		return ""
+	}
+	if u := firstString(p, "url", "image"); u != "" {
+		return u
+	}
+	switch v := p["image_url"].(type) {
+	case string:
+		if strings.TrimSpace(v) != "" {
+			return strings.TrimSpace(v)
+		}
+	case map[string]any:
+		if u := firstString(v, "url"); u != "" {
+			return u
+		}
+	}
+	if src, ok := p["source"].(map[string]any); ok {
+		if strings.EqualFold(firstString(src, "type"), "base64") {
+			media := firstString(src, "media_type")
+			if media == "" {
+				media = "image/png"
+			}
+			data := firstString(src, "data")
+			if data != "" {
+				return "data:" + media + ";base64," + data
+			}
+		}
+		if u := firstString(src, "url"); u != "" {
+			return u
+		}
+	}
+	return ""
+}
+
 func firstString(m map[string]any, keys ...string) string {
 	if m == nil {
 		return ""
@@ -367,7 +510,11 @@ type responsesBridge struct {
 	nextTool  int
 	usage     map[string]any
 	finish    string
-	mu        sync.Mutex
+	// hasPayload tracks whether streaming events already emitted client-visible
+	// text/reasoning/tool output. Some upstreams only include final output on
+	// response.completed; bridge that once, but do not duplicate streamed deltas.
+	hasPayload bool
+	mu         sync.Mutex
 }
 
 func translateOrPassthroughSSE(reader io.Reader, writer io.Writer) error {
@@ -540,12 +687,14 @@ func (b *responsesBridge) handle(event map[string]any) []string {
 		if delta == "" {
 			return nil
 		}
+		b.hasPayload = true
 		return []string{b.encodeDelta(map[string]any{"content": delta}, nil)}
 	case "response.reasoning_summary_text.delta", "response.reasoning_text.delta":
 		delta, _ := event["delta"].(string)
 		if delta == "" {
 			return nil
 		}
+		b.hasPayload = true
 		return []string{b.encodeDelta(map[string]any{"reasoning_content": delta}, nil)}
 	case "response.output_item.added":
 		item, _ := event["item"].(map[string]any)
@@ -569,6 +718,7 @@ func (b *responsesBridge) handle(event map[string]any) []string {
 				"arguments": args,
 			},
 		}
+		b.hasPayload = true
 		return []string{b.encodeDelta(map[string]any{"tool_calls": []any{toolCall}}, nil)}
 	case "response.function_call_arguments.delta":
 		delta, _ := event["delta"].(string)
@@ -584,6 +734,7 @@ func (b *responsesBridge) handle(event map[string]any) []string {
 				"arguments": delta,
 			},
 		}
+		b.hasPayload = true
 		return []string{b.encodeDelta(map[string]any{"tool_calls": []any{toolCall}}, nil)}
 	case "response.output_item.done":
 		item, _ := event["item"].(map[string]any)
@@ -622,6 +773,9 @@ func (b *responsesBridge) handle(event map[string]any) []string {
 			}
 			if b.finish == "" {
 				b.finish = finishFromResponsesOutput(resp["output"])
+			}
+			if !b.hasPayload {
+				return b.completedOutputFrames(resp["output"])
 			}
 		}
 		return nil
@@ -749,6 +903,79 @@ func responsesUsageToChat(usage map[string]any) map[string]any {
 	return out
 }
 
+func (b *responsesBridge) completedOutputFrames(raw any) []string {
+	items, ok := raw.([]any)
+	if !ok {
+		return nil
+	}
+	frames := make([]string, 0, len(items))
+	for _, item := range items {
+		m, _ := item.(map[string]any)
+		if m == nil {
+			continue
+		}
+		switch firstString(m, "type") {
+		case "message":
+			for _, text := range outputTextParts(m["content"]) {
+				b.hasPayload = true
+				frames = append(frames, b.encodeDelta(map[string]any{"content": text}, nil))
+			}
+		case "reasoning":
+			for _, text := range outputTextParts(firstNonNil(m["summary"], m["content"])) {
+				b.hasPayload = true
+				frames = append(frames, b.encodeDelta(map[string]any{"reasoning_content": text}, nil))
+			}
+		case "function_call":
+			idx := b.toolIdx(m)
+			callID := firstString(m, "call_id", "id")
+			name := firstString(m, "name")
+			args, _ := m["arguments"].(string)
+			if callID == "" && name == "" && args == "" {
+				continue
+			}
+			toolCall := map[string]any{
+				"index": idx,
+				"id":    callID,
+				"type":  "function",
+				"function": map[string]any{
+					"name":      name,
+					"arguments": args,
+				},
+			}
+			b.hasPayload = true
+			frames = append(frames, b.encodeDelta(map[string]any{"tool_calls": []any{toolCall}}, nil))
+		}
+	}
+	return frames
+}
+
+func outputTextParts(raw any) []string {
+	var out []string
+	var walk func(any)
+	walk = func(value any) {
+		switch v := value.(type) {
+		case string:
+			if strings.TrimSpace(v) != "" {
+				out = append(out, v)
+			}
+		case []any:
+			for _, item := range v {
+				walk(item)
+			}
+		case map[string]any:
+			if text, _ := v["text"].(string); strings.TrimSpace(text) != "" {
+				out = append(out, text)
+				return
+			}
+			if text, _ := v["content"].(string); strings.TrimSpace(text) != "" {
+				out = append(out, text)
+			}
+		}
+	}
+	walk(raw)
+	return out
+}
+
 func finishFromResponsesOutput(raw any) string {
 	items, ok := raw.([]any)
 	if !ok {
@@ -817,32 +1044,17 @@ func asInt64(value any) (int64, bool) {
 // Ensure unused import guard for bytes in case of future binary ops.
 var _ = bytes.MinRead
 
-// clampGrokEffort folds client 4-tier labels onto Grok's three levels.
-// Grok accepts only low|medium|high — xhigh/extra-high/max must become high
-// or the upstream request can fail / be ignored.
+// clampGrokEffort folds Claude Code / Anthropic client labels onto Grok's three
+// levels (low|medium|high). xhigh / max / ultracode / Ultra / Proactive / extra-high → high.
+// Empty / disabled defaults to low for TTFT-friendly outbound.
 func clampGrokEffort(effort string) string {
-	s := strings.ToLower(strings.TrimSpace(effort))
-	s = strings.ReplaceAll(s, "_", "-")
-	s = strings.Join(strings.Fields(s), "-")
-	switch s {
-	case "", "none", "null", "false", "off", "disabled":
-		return "low"
-	case "low", "minimal", "min", "auto", "fast", "lite":
-		return "low"
-	case "medium", "default", "normal", "med", "m", "adaptive", "enabled", "true", "on", "1", "balanced":
-		return "medium"
-	case "high", "standard", "std", "h",
-		"xhigh", "x-high", "extra-high", "extrahigh", "extra",
-		"max", "maximum", "ultra", "ultra-high", "highest":
-		return "high"
-	default:
-		// unknown → medium (safe middle) rather than pass-through garbage
-		if strings.Contains(s, "high") || strings.Contains(s, "max") {
-			return "high"
-		}
-		if strings.Contains(s, "low") || s == "auto" {
-			return "low"
-		}
-		return "medium"
+	if up := reasoning.ToUpstream(effort); up != "" {
+		return up
 	}
+	s := strings.ToLower(strings.TrimSpace(effort))
+	if s == "" || s == "none" || s == "null" || s == "false" || s == "off" || s == "disabled" {
+		return "low"
+	}
+	// Unknown non-empty → medium (safe middle) rather than pass-through garbage.
+	return "medium"
 }

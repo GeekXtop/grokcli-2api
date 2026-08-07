@@ -17,12 +17,16 @@ import (
 	"github.com/hm2899/grokcli-2api/internal/maintainer"
 	"github.com/hm2899/grokcli-2api/internal/modelhealth"
 	"github.com/hm2899/grokcli-2api/internal/models"
+	"github.com/hm2899/grokcli-2api/internal/pool"
+	"github.com/hm2899/grokcli-2api/internal/protocol/historycompact"
+	"github.com/hm2899/grokcli-2api/internal/protocol/toolcall"
 	"github.com/hm2899/grokcli-2api/internal/quota"
 	appruntime "github.com/hm2899/grokcli-2api/internal/runtime"
 	"github.com/hm2899/grokcli-2api/internal/server"
 	"github.com/hm2899/grokcli-2api/internal/store/postgres"
 	"github.com/hm2899/grokcli-2api/internal/store/redis"
 	"github.com/hm2899/grokcli-2api/internal/upstream/grok"
+	"github.com/hm2899/grokcli-2api/internal/upstream/minimax"
 	"github.com/hm2899/grokcli-2api/internal/upstream/oidc"
 )
 
@@ -77,7 +81,7 @@ func main() {
 		}
 	}
 
-	if store != nil {
+	if store != nil && !cfg.MiniMaxEnabled() {
 		oidcClient := &oidc.Client{}
 		maintSvc = maintainer.New(store, redisClient, oidcClient)
 		healthSvc = modelhealth.New(store, redisClient, cfg.UpstreamBase, []string{cfg.DefaultModel})
@@ -133,15 +137,111 @@ func main() {
 	if store != nil {
 		if settings, err := store.PublicSettings(context.Background()); err == nil {
 			runtimeCfg.ApplyStoreSettings(settings)
+			// Hot knobs for model health (interval/batch/workers) from durable settings.
+			if healthSvc != nil {
+				var intervalSec float64
+				var batch, workers int
+				switch v := settings["model_health_interval_sec"].(type) {
+				case float64:
+					intervalSec = v
+				case int:
+					intervalSec = float64(v)
+				case int64:
+					intervalSec = float64(v)
+				}
+				switch v := settings["model_health_probe_batch"].(type) {
+				case float64:
+					batch = int(v)
+				case int:
+					batch = v
+				case int64:
+					batch = int(v)
+				}
+				switch v := settings["model_health_probe_workers"].(type) {
+				case float64:
+					workers = int(v)
+				case int:
+					workers = v
+				case int64:
+					workers = int(v)
+				}
+				healthSvc.Configure(intervalSec, batch, workers)
+			}
+			// History compact: admin DB settings must override env defaults for Codex long sessions.
+			{
+				opts := historycompact.ConfigureOpts{}
+				if v, ok := settings["history_compact_enabled"].(bool); ok {
+					opts.Enabled = &v
+				}
+				switch v := settings["history_compact_auto_chars"].(type) {
+				case float64:
+					n := int(v)
+					opts.AutoChars = &n
+				case int:
+					n := v
+					opts.AutoChars = &n
+				case int64:
+					n := int(v)
+					opts.AutoChars = &n
+				}
+				switch v := settings["history_keep_tool_rounds"].(type) {
+				case float64:
+					n := int(v)
+					opts.KeepToolRounds = &n
+				case int:
+					n := v
+					opts.KeepToolRounds = &n
+				case int64:
+					n := int(v)
+					opts.KeepToolRounds = &n
+				}
+				switch v := settings["history_max_tool_result_chars"].(type) {
+				case float64:
+					n := int(v)
+					opts.MaxToolResultChars = &n
+				case int:
+					n := v
+					opts.MaxToolResultChars = &n
+				case int64:
+					n := int(v)
+					opts.MaxToolResultChars = &n
+				}
+				historycompact.ConfigureFull(opts)
+			}
+			if v, ok := settings["debug_shell_args"].(bool); ok {
+				toolcall.ConfigureDebugShellArgs(v)
+			}
+			snap := historycompact.Snapshot()
 			slog.Info("loaded durable settings into runtime config",
 				"default_model", runtimeCfg.DefaultModel,
 				"sse_keepalive", runtimeCfg.SSEKeepalive.String(),
 				"outbound_max_tools", runtimeCfg.OutboundMaxTools,
+				"history_compact_enabled", snap["enabled"],
+				"history_compact_auto_chars", snap["auto_chars"],
+				"debug_shell_args", toolcall.DebugShellArgsEnabled(),
 			)
 		} else {
 			slog.Warn("failed to load durable settings at boot", "error", err)
 		}
 	}
+	var upstreamHTTP grok.Opener = &grok.Client{BaseURL: cfg.UpstreamBase}
+	var candidates []pool.Candidate
+	var quotaSvc *quota.Service
+	if cfg.MiniMaxEnabled() {
+		upstreamHTTP = &minimax.Client{
+			OpenAIBaseURL:    cfg.MiniMaxOpenAIBaseURL,
+			AnthropicBaseURL: cfg.MiniMaxAnthropicBaseURL,
+		}
+		candidates = []pool.Candidate{{
+			ID:      "minimax",
+			Token:   cfg.MiniMaxAPIKey,
+			Enabled: true,
+			Weight:  1,
+		}}
+	} else {
+		quotaSvc = quota.New(store, cfg.UpstreamBase)
+	}
+
 	handler := server.NewMux(server.Options{
 		Ready:             readiness.Ready,
 		Reason:            readiness.Reason,
@@ -155,15 +255,16 @@ func main() {
 		APIKeys:           auth.NewAPIKeyVerifier(cfg, store),
 		Models:            models.NewCatalog(cfg, store),
 		Store:             store,
+		Candidates:        candidates,
 		AdminSessions:     adminSessions,
 		PickObserver:      redis.NewPickObserver(redisClient),
 		AffinityStore:     redis.NewChatAffinity(redisClient, 24*time.Hour),
-		Upstream:          &grok.Client{BaseURL: cfg.UpstreamBase},
+		Upstream:          upstreamHTTP,
 		Redis:             redisClient,
 		Leader:            leader,
 		Maintainer:        maintSvc,
 		ModelHealth:       healthSvc,
-		Quota:             quota.New(store, cfg.UpstreamBase),
+		Quota:             quotaSvc,
 		Config:            cfg,
 		RuntimeConfig:     &runtimeCfg,
 		RegistrationURL:   cfg.RegistrationServiceURL,

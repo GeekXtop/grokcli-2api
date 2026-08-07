@@ -18,9 +18,12 @@ Captcha browser pool itself is the sibling process turnstile-solver
 
 from __future__ import annotations
 
+import asyncio
 import os
 import secrets
 import sys
+import threading
+import time
 from pathlib import Path
 import json
 from typing import Any
@@ -141,6 +144,83 @@ def availability(request: Request) -> dict[str, Any]:
     return adapter.registration_available()
 
 
+@app.post(f"{API_PREFIX}/mail/domains")
+async def list_mail_domains(request: Request) -> dict[str, Any]:
+    """List selectable domains for YYDS / GPTMail / CF Temp Email / TempMail.lol / Cloud Mail / MoeMail."""
+    _require_auth(request)
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    if not isinstance(body, dict):
+        body = {}
+    try:
+        from grok2api.upstream import moemail as mail
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=500, detail=f"moemail module unavailable: {exc}") from exc
+
+    prov = mail.normalize_mail_provider(
+        body.get("mail_provider") or body.get("provider"),
+        base_url=str(body.get("base_url") or body.get("moemail_base_url") or body.get("cfmail_base_url") or body.get("cloudmail_base_url") or ""),
+    )
+    key = str(
+        body.get("api_key")
+        or body.get("moemail_api_key")
+        or body.get("yyds_api_key")
+        or body.get("gptmail_api_key")
+        or body.get("cfmail_api_key")
+        or body.get("tempmail_api_key")
+        or body.get("cloudmail_api_key")
+        or ""
+    ).strip()
+    base = str(
+        body.get("base_url")
+        or body.get("moemail_base_url")
+        or body.get("cfmail_base_url")
+        or body.get("cloudmail_base_url")
+        or ""
+    ).strip()
+    domains: list[str] = []
+    note = ""
+    base_out = base
+    try:
+        if prov == "yyds":
+            domains = mail.yyds_list_domains(api_key=key or None, base_url=base or None)
+            note = "YYDS GET /v1/domains"
+            base_out = mail.normalize_yyds_base_url(base or None)
+        elif prov == "gptmail":
+            domains = mail.gptmail_list_domains(api_key=key or None, base_url=base or None)
+            note = "GPTMail GET /api/domains/public"
+            base_out = mail.normalize_gptmail_base_url(base or None)
+        elif prov == "cfmail":
+            domains = mail.cfmail_list_domains(api_key=key or None, base_url=base or None)
+            note = "CF Temp Email GET /open_api/settings"
+            base_out = (base or mail.CFMAIL_DEFAULT_BASE_URL).rstrip("/")
+        elif prov == "tempmail":
+            domains = mail.tempmail_list_domains(api_key=key or None, base_url=base or None)
+            note = "TempMail.lol free: random domain (no catalog)"
+            base_out = mail.normalize_tempmail_base_url(base or None)
+        elif prov == "cloudmail":
+            domains = mail.cloudmail_list_domains(api_key=key or None, base_url=base or None)
+            note = "Cloud Mail GET /api/setting/websiteConfig"
+            base_out = mail.normalize_cloudmail_base_url(base or None)
+        else:
+            # MoeMail has no universal public catalog; return configured domain list.
+            domains = mail.parse_domain_list(str(body.get("domain") or body.get("moemail_domain") or ""))
+            note = "MoeMail: no public catalog; showing configured domains only"
+            base_out = base
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return {
+        "ok": True,
+        "mail_provider": prov,
+        "base_url": base_out,
+        "domains": domains,
+        "count": len(domains),
+        "note": note,
+    }
+
+
 @app.post(f"{API_PREFIX}/jobs")
 async def start_job(
     request: Request,
@@ -157,6 +237,8 @@ async def start_job(
     # Idempotency key is accepted for contract compatibility; adapter currently
     # relies on its own session/batch ids.
     _ = idempotency_key
+    # Accept full body keys then resolve active mail credentials into the
+    # historical moemail_api_key / moemail_base_url fields the adapter reads.
     kwargs = {
         k: body.get(k)
         for k in (
@@ -177,10 +259,167 @@ async def start_job(
             "concurrency",
             "stagger_ms",
             "probe_delay_sec",
+            "yyds_api_key",
+            "gptmail_api_key",
+            "cfmail_api_key",
+            "tempmail_api_key",
+            "cloudmail_api_key",
+            "yyds_domain",
+            "gptmail_domain",
+            "cfmail_domain",
+            "tempmail_domain",
+            "cloudmail_domain",
+            "moemail_domain",
+            "cfmail_base_url",
+            "cloudmail_base_url",
+            "api_key",
+            "base_url",
         )
         if k in body
     }
-    result = adapter.start_registration(**kwargs)
+    try:
+        from grok2api.upstream.moemail import normalize_mail_provider as _nmp
+
+        prov = _nmp(
+            kwargs.get("mail_provider"),
+            base_url=str(kwargs.get("moemail_base_url") or kwargs.get("cfmail_base_url") or kwargs.get("cloudmail_base_url") or kwargs.get("base_url") or ""),
+        )
+    except Exception:
+        prov = str(kwargs.get("mail_provider") or "moemail").strip().lower() or "moemail"
+    kwargs["mail_provider"] = prov
+    # Active domain from provider-specific slot.
+    dom = str(kwargs.get("domain") or "").strip()
+    if prov == "yyds":
+        dom = str(kwargs.get("yyds_domain") or dom).strip()
+        key = str(kwargs.get("yyds_api_key") or kwargs.get("api_key") or "").strip()
+        # Prefer dedicated slot; only fall back to moemail_api_key if it looks like YYDS.
+        if not key:
+            mk = str(kwargs.get("moemail_api_key") or "").strip()
+            if mk.startswith("AC-"):
+                key = mk
+        kwargs["moemail_api_key"] = key
+        kwargs["moemail_base_url"] = ""  # fixed host
+        kwargs["domain"] = dom
+        if not key:
+            raise HTTPException(
+                status_code=400,
+                detail="YYDS API Key missing. Save AC-… key in 协议注册配置 (YYDS panel).",
+            )
+    elif prov == "gptmail":
+        dom = str(kwargs.get("gptmail_domain") or dom).strip()
+        key = str(kwargs.get("gptmail_api_key") or kwargs.get("api_key") or "").strip()
+        # Empty key is OK only if a real sk-… is later provided; reject other shapes.
+        if key.startswith("mk_") or key.startswith("AC-"):
+            key = ""
+        kwargs["moemail_api_key"] = key
+        kwargs["moemail_base_url"] = ""
+        kwargs["domain"] = dom
+        if not key:
+            raise HTTPException(
+                status_code=400,
+                detail="GPTMail API Key missing. Save sk-… from https://mail.chatgpt.org.uk/zh/api/",
+            )
+    elif prov == "cfmail":
+        dom = str(kwargs.get("cfmail_domain") or dom).strip()
+        key = str(kwargs.get("cfmail_api_key") or kwargs.get("api_key") or kwargs.get("moemail_api_key") or "").strip()
+        base = str(kwargs.get("cfmail_base_url") or kwargs.get("base_url") or kwargs.get("moemail_base_url") or "").strip()
+        kwargs["moemail_api_key"] = key
+        kwargs["moemail_base_url"] = base
+        kwargs["domain"] = dom
+        if not key:
+            raise HTTPException(
+                status_code=400,
+                detail="CF Temp Email admin password/key missing.",
+            )
+        if not base:
+            raise HTTPException(
+                status_code=400,
+                detail="CF Temp Email Base URL missing.",
+            )
+    elif prov == "cloudmail":
+        # Cloud Mail (maillab/cloud-mail): admin_email:password credential +
+        # self-hosted Worker origin. Adapter reads moemail_api_key /
+        # moemail_base_url as the active mail slots.
+        dom = str(kwargs.get("cloudmail_domain") or dom).strip()
+        key = str(
+            kwargs.get("cloudmail_api_key")
+            or kwargs.get("api_key")
+            or kwargs.get("moemail_api_key")
+            or ""
+        ).strip()
+        base = str(
+            kwargs.get("cloudmail_base_url")
+            or kwargs.get("base_url")
+            or kwargs.get("moemail_base_url")
+            or ""
+        ).strip()
+        kwargs["moemail_api_key"] = key
+        kwargs["moemail_base_url"] = base
+        kwargs["domain"] = dom
+        if not key:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "Cloud Mail admin credentials missing. Save "
+                    "`admin_email:password` in 协议注册配置 (Cloud Mail panel). "
+                    "Repo: https://github.com/maillab/cloud-mail"
+                ),
+            )
+        if not base:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "Cloud Mail Base URL missing. Save self-hosted Worker origin "
+                    "(e.g. https://skymail.example.com) in 协议注册配置 (Cloud Mail panel)."
+                ),
+            )
+    elif prov == "tempmail":
+        # Free tier: no API key required. Optional Plus/Ultra Bearer key.
+        dom = str(kwargs.get("tempmail_domain") or dom).strip()
+        key = str(kwargs.get("tempmail_api_key") or kwargs.get("api_key") or "").strip()
+        kwargs["moemail_api_key"] = key
+        kwargs["moemail_base_url"] = ""
+        kwargs["domain"] = dom
+    else:
+        key = str(kwargs.get("moemail_api_key") or kwargs.get("api_key") or "").strip()
+        base = str(kwargs.get("moemail_base_url") or kwargs.get("base_url") or "").strip()
+        dom = str(kwargs.get("moemail_domain") or dom).strip()
+        # Reject cross-provider pollution (YYDS AC-* / GPTMail sk-* in MoeMail slot).
+        if key.startswith("AC-") or key.lower().startswith("sk-"):
+            key = ""
+        kwargs["moemail_api_key"] = key
+        kwargs["moemail_base_url"] = base
+        kwargs["domain"] = dom
+        if not key:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "MoeMail API Key missing or invalid (got YYDS/GPTMail-shaped key). "
+                    "Re-save MoeMail Key (mk_…) in 协议注册配置 — switching providers "
+                    "must not overwrite the MoeMail slot."
+                ),
+            )
+        if not base:
+            raise HTTPException(
+                status_code=400,
+                detail="MoeMail Base URL missing. Re-save MoeMail Base URL in 协议注册配置.",
+            )
+    # Drop non-adapter kwargs
+    for drop in (
+        "yyds_api_key", "gptmail_api_key", "cfmail_api_key", "tempmail_api_key", "cloudmail_api_key",
+        "yyds_domain", "gptmail_domain", "cfmail_domain", "tempmail_domain", "cloudmail_domain", "moemail_domain",
+        "cfmail_base_url", "cloudmail_base_url", "api_key", "base_url",
+    ):
+        kwargs.pop(drop, None)
+    # start_registration is sync and can block for seconds (local solver wait,
+    # mailbox prepare, brief batch warm-up sleep). Running it on the asyncio
+    # event loop freezes the whole sidecar — concurrent /sessions and /stop
+    # then miss Go's 750ms poll budget and surface as admin 502s. Offload so
+    # poll/stop handlers keep answering while start runs in a worker thread.
+    try:
+        result = await asyncio.to_thread(adapter.start_registration, **kwargs)
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=500, detail=f"registration start failed: {exc}") from exc
     if not isinstance(result, dict):
         raise HTTPException(status_code=500, detail="invalid registration response")
     if result.get("ok") is False:
@@ -188,11 +427,134 @@ async def start_job(
     return _jsonable(result)
 
 
+# --- Bounded /sessions response.
+# Registration sessions accumulate in the Redis mirror (REG_TTL=72h) and
+# list_registration_sessions() re-merges ALL of them and rebuilds one object per
+# session on every poll -> 2879 sessions => ~9-11MB payload / ~1.3s build that
+# timed out the polling client (Go Timeout=750ms / ResponseHeaderTimeout=600ms),
+# making the UI "refresh progress" appear dead.
+# Fixes:
+#   (a) prune old *terminal* sessions from Redis in a BACKGROUND thread so the
+#       rebuild stays small, without blocking the request path past the 600ms
+#       header budget (cold full-delete of ~3k keys was ~1.5s);
+#   (b) cache the bounded result briefly so repeated polls return instantly;
+#   (c) hard-cap the returned list so body stays well under the 4MB read limit.
+# ACTIVE (non-terminal) sessions are never pruned, so in-flight work is safe.
+_LIST_CACHE: dict[str, Any] = {"t": 0.0, "data": None}
+_LIST_CACHE_TTL = 2.0
+_PRUNE_LAST = {"t": 0.0}
+_PRUNE_INTERVAL = 30.0
+_PRUNE_TERMINAL_TTL = 900.0  # keep terminal sessions in Redis <= 15 min
+_PRUNE_MAX_PER_CYCLE = 300   # bound cold-path work so one cycle never hog Redis
+_PRUNE_STATE = {"running": False}
+_PRUNE_LOCK = threading.Lock()
+_TERMINAL_STATUSES = frozenset({
+    "success", "completed", "done", "failed", "error", "stopped",
+    "abandoned", "expired", "imported", "cancelled", "canceled",
+    "timed_out", "timeout",
+})
+
+
+def _prune_redis_sessions_once() -> int:
+    """Delete up to _PRUNE_MAX_PER_CYCLE old terminal sessions. Returns count."""
+    deleted = 0
+    try:
+        from grok2api.store import sessions_redis
+        if not getattr(sessions_redis, "redis_enabled", lambda: False)():
+            return 0
+        now = time.time()
+        cutoff = now - _PRUNE_TERMINAL_TTL
+        for s in (sessions_redis.reg_sess_list() or []):
+            if deleted >= _PRUNE_MAX_PER_CYCLE:
+                break
+            if not isinstance(s, dict):
+                continue
+            st = str(s.get("status", "")).lower()
+            if st not in _TERMINAL_STATUSES and not s.get("finished"):
+                continue  # never prune active sessions
+            ua = float(s.get("updated_at") or s.get("created_at") or 0)
+            if ua and ua < cutoff:
+                sid = str(s.get("id") or "")
+                if sid:
+                    sessions_redis.reg_sess_delete(sid)
+                    deleted += 1
+    except Exception:
+        pass
+    return deleted
+
+
+def _prune_worker() -> None:
+    try:
+        _prune_redis_sessions_once()
+    finally:
+        with _PRUNE_LOCK:
+            _PRUNE_STATE["running"] = False
+
+
+def _kick_prune_background() -> None:
+    """Non-blocking: fire prune on a daemon thread if interval elapsed."""
+    now = time.time()
+    if now - _PRUNE_LAST["t"] < _PRUNE_INTERVAL:
+        return
+    with _PRUNE_LOCK:
+        if _PRUNE_STATE["running"]:
+            return
+        _PRUNE_STATE["running"] = True
+        _PRUNE_LAST["t"] = now
+    t = threading.Thread(
+        target=_prune_worker,
+        name="reg-sess-prune",
+        daemon=True,
+    )
+    t.start()
+
+
 @app.get(f"{API_PREFIX}/sessions")
 def list_sessions(request: Request) -> dict[str, Any]:
     _require_auth(request)
     adapter = _adapter()
-    return _jsonable(adapter.list_registration_sessions())
+    # Kick prune OFF the request path so ResponseHeaderTimeout(600ms) is safe
+    # even when Redis still holds thousands of terminal rows.
+    _kick_prune_background()
+    now = time.time()
+    if _LIST_CACHE["data"] is not None and (now - _LIST_CACHE["t"]) < _LIST_CACHE_TTL:
+        return _jsonable(_LIST_CACHE["data"])
+    data = adapter.list_registration_sessions()
+    if isinstance(data, dict) and "sessions" in data:
+        sessions = data.get("sessions") or []
+        try:
+            sessions = sorted(
+                sessions,
+                key=lambda s: (s.get("updated_at") or 0),
+                reverse=True,
+            )
+        except Exception:
+            pass
+        terminal = _TERMINAL_STATUSES
+        active = [s for s in sessions
+                  if str(s.get("status", "")).lower() not in terminal]
+        finished = [s for s in sessions
+                    if str(s.get("status", "")).lower() in terminal]
+        KEEP_TERMINAL = 150
+        HARD_CAP = 250
+        # Prefer active (UI progress); append recent terminal; hard-cap total.
+        # If active alone exceeds HARD_CAP (shouldn't with REG_CONCURRENCY=3),
+        # keep the newest active first so live work still shows up.
+        bounded = active + finished[:KEEP_TERMINAL]
+        if len(bounded) > HARD_CAP:
+            bounded = bounded[:HARD_CAP]
+        total = len(sessions)
+        result = {
+            "sessions": bounded,
+            "total": total,
+            "returned": len(bounded),
+            "truncated": total != len(bounded),
+        }
+    else:
+        result = data
+    _LIST_CACHE["data"] = result
+    _LIST_CACHE["t"] = time.time()
+    return _jsonable(result)
 
 
 @app.get(f"{API_PREFIX}/sessions/{{session_id}}")
@@ -238,7 +600,13 @@ async def resume_batch(batch_id: str, request: Request) -> dict[str, Any]:
             force = bool(body.get("force"))
     except Exception:
         force = False
-    return _jsonable(adapter.resume_registration_batch(batch_id, force=force))
+    try:
+        result = await asyncio.to_thread(
+            adapter.resume_registration_batch, batch_id, force=force
+        )
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=500, detail=f"registration resume failed: {exc}") from exc
+    return _jsonable(result)
 
 
 @app.post(f"{API_PREFIX}/batches/{{batch_id}}/stop")
@@ -259,18 +627,26 @@ async def reclaim(request: Request) -> dict[str, Any]:
             auto_resume = bool(body.get("auto_resume"))
     except Exception:
         pass
-    # Prefer batch reclaim which also reclaims sessions.
-    fn = getattr(adapter, "reclaim_orphaned_registration_batches", None)
-    if callable(fn):
-        # signature may not take auto_resume; call best-effort
-        try:
-            return _jsonable(fn(auto_resume=auto_resume))  # type: ignore[misc]
-        except TypeError:
-            return _jsonable(fn())
-    fn2 = getattr(adapter, "reclaim_orphaned_registration_sessions", None)
-    if callable(fn2):
-        return _jsonable(fn2())
-    return {"ok": True, "reclaimed": 0}
+
+    def _reclaim_sync() -> Any:
+        # Prefer batch reclaim which also reclaims sessions.
+        fn = getattr(adapter, "reclaim_orphaned_registration_batches", None)
+        if callable(fn):
+            # signature may not take auto_resume; call best-effort
+            try:
+                return fn(auto_resume=auto_resume)  # type: ignore[misc]
+            except TypeError:
+                return fn()
+        fn2 = getattr(adapter, "reclaim_orphaned_registration_sessions", None)
+        if callable(fn2):
+            return fn2()
+        return {"ok": True, "reclaimed": 0}
+
+    try:
+        result = await asyncio.to_thread(_reclaim_sync)
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=500, detail=f"registration reclaim failed: {exc}") from exc
+    return _jsonable(result)
 
 
 @app.post(f"{API_PREFIX}/stop")
@@ -305,7 +681,7 @@ async def device_login_start(request: Request) -> dict[str, Any]:
     except Exception as exc:  # noqa: BLE001
         raise HTTPException(status_code=503, detail=f"device login unavailable: {exc}") from exc
     try:
-        result = start_login(mode=mode, capture=capture)
+        result = await asyncio.to_thread(start_login, mode=mode, capture=capture)
     except Exception as exc:  # noqa: BLE001
         raise HTTPException(status_code=500, detail=f"device login failed: {exc}") from exc
     if not isinstance(result, dict):
@@ -407,7 +783,7 @@ async def sso_import_start(request: Request) -> dict[str, Any]:
         from grok2api.config import SSO_IMPORT_WORKERS
     except Exception:
         SSO_IMPORT_WORKERS = 8
-    workers = min(int(max_workers), int(SSO_IMPORT_WORKERS), max(1, len(sso_items)), 6)
+    workers = min(int(max_workers), int(SSO_IMPORT_WORKERS), max(1, len(sso_items)), 12)
     if delay and delay >= 2:
         workers = min(workers, 2)
 
