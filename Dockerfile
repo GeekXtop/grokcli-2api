@@ -2,6 +2,10 @@
 # grokcli-2api — single container with optional inline Turnstile Solver
 FROM golang:1.24-bookworm AS go-builder
 
+ENV GOPATH=/go \
+    GOMODCACHE=/go/pkg/mod \
+    GOCACHE=/go/cache
+
 WORKDIR /src
 COPY go.mod go.sum ./
 RUN go mod download
@@ -153,8 +157,14 @@ ENTRYPOINT ["/app/entrypoint.sh"]
 FROM runtime-base AS development
 COPY --from=go-builder /usr/local/go /usr/local/go
 COPY --from=go-builder /go /go
+RUN mkdir -p /opt/grok2api-dev/bin \
+    && cp /app/bin/grok2api /opt/grok2api-dev/bin/grok2api \
+    && cp /app/bin/grok2api-migrate /opt/grok2api-dev/bin/grok2api-migrate \
+    && python /app/scripts/dev_source_fingerprint.py /app > /opt/grok2api-dev/source.digest
 ENV PATH=/usr/local/go/bin:${PATH} \
-    GOPATH=/go
+    GOPATH=/go \
+    GOMODCACHE=/go/pkg/mod \
+    GOCACHE=/go/cache
 
 FROM runtime-base AS production
 CMD ["/app/bin/grok2api"]

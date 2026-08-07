@@ -43,6 +43,27 @@ class DockerfileTests(unittest.TestCase):
         )
         self.assertIn("FROM runtime-base AS production\nCMD", dockerfile)
 
+    def test_development_bakes_cache_and_prebuilt_artifacts(self) -> None:
+        dockerfile = (ROOT / "Dockerfile").read_text()
+        for value in (
+            "GOPATH=/go",
+            "GOMODCACHE=/go/pkg/mod",
+            "GOCACHE=/go/cache",
+            "/opt/grok2api-dev/bin/grok2api",
+            "/opt/grok2api-dev/bin/grok2api-migrate",
+            "/opt/grok2api-dev/source.digest",
+        ):
+            self.assertIn(value, dockerfile)
+        self.assertIn("COPY --from=go-builder /go /go", dockerfile)
+        self.assertIn("COPY --from=go-builder /usr/local/go /usr/local/go", dockerfile)
+
+    def test_production_section_does_not_copy_go_toolchain(self) -> None:
+        dockerfile = (ROOT / "Dockerfile").read_text()
+        production = dockerfile[dockerfile.index("FROM runtime-base AS production") :]
+        self.assertNotIn("/usr/local/go", production)
+        self.assertNotIn("/go/pkg/mod", production)
+        self.assertNotIn("/opt/grok2api-dev", production)
+
 
 if __name__ == "__main__":
     unittest.main()
