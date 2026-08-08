@@ -167,8 +167,9 @@ docker compose -f compose.dev.yml logs -f api-dev
 ```
 
 拉取失败或健康检查超时会返回非零并打印 `ps`/`logs` 诊断；**拉取失败不清理**，
-脚本不执行 `down`、`rm`、`volume prune`，也不删除 PostgreSQL、Redis 或应用数据卷。
-现有容器会保持运行，修复网络或标签后可再次执行脚本。需要手动诊断时：
+脚本不执行 `docker compose down`、`volume prune` 或带 `-v` 的卷删除，也不删除 PostgreSQL、
+Redis 或应用数据卷（事务只清理临时候选容器）。
+事务失败后现有容器会恢复为运行状态，修复网络或标签后可再次执行脚本。需要手动诊断时：
 
 ```bash
 docker compose -f compose.dev.yml ps
@@ -196,7 +197,12 @@ GROK2API_DEV_IMAGE=ghcr.io/geekxtop/grokcli-2api:sha-dev-<commit> \
   ./scripts/g2a-dev-pull.sh
 ```
 
-开发 Compose 继续挂载 `.:/app`；`GROK2API_RUNTIME=go`、单 worker、
+对于 `sha-dev-*`，更新脚本会自动使用 `compose.dev.pinned.yml`，移除三个服务的
+`.:/app` 主机挂载；这使回滚真正执行 SHA 镜像内的代码、脚本和预编译程序，而不会被较新的
+当前 checkout 覆盖。该 image-only 模式不提供本地热更新。默认 `dev` 流程仍保留源码挂载和
+容器内 Go watcher。
+
+默认开发 Compose 继续挂载 `.:/app`；`GROK2API_RUNTIME=go`、单 worker、
 `GROK2API_RELOAD=1` 保持开发热更新，Go 文件修改由容器内 watcher 增量编译并热重启。
 
 ### GHCR 不可用时的本地救援 overlay

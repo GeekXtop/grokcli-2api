@@ -20,6 +20,13 @@ class DevWorkflowTests(unittest.TestCase):
         self.assertIn("contents: read", self.text)
         self.assertIn("cancel-in-progress: true", self.text)
 
+    def test_checkout_does_not_persist_token_into_worktree(self) -> None:
+        checkout_start = self.text.index("uses: actions/checkout@v4")
+        checkout_block = self.text[checkout_start : self.text.find("\n      - name:", checkout_start)]
+        self.assertIn("persist-credentials: false", checkout_block)
+        self.assertIn("packages: write", self.text)
+        self.assertIn("github_token=${{ github.token }}", self.text)
+
     def test_build_and_promotion_contract(self) -> None:
         for value in (
             "target: development",

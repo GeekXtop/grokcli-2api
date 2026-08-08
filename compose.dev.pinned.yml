@@ -1,0 +1,9 @@
+# Image-only rollback overlay.  The pull script selects this file for a
+# sha-dev-* image so the checked-out host source cannot mask the pinned image.
+services:
+  api-dev:
+    volumes: !reset []
+  solver-dev:
+    volumes: !reset []
+  assets-dev:
+    volumes: !reset []

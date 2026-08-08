@@ -14,6 +14,8 @@ class DevDocumentationTests(unittest.TestCase):
             "sha-dev-<commit>",
             "linux/amd64",
             "compose.dev.local.yml",
+            "compose.dev.pinned.yml",
+            "image-only",
             "--no-build",
         ):
             self.assertIn(value, text)
@@ -23,6 +25,8 @@ class DevDocumentationTests(unittest.TestCase):
         self.assertIn("不删除", text)
         self.assertIn("sha-dev-", text)
         self.assertIn("g2a-dev-pull.sh", text)
+        self.assertIn("compose.dev.pinned.yml", text)
+        self.assertIn("image-only", text)
 
     def test_env_example_declares_dev_image_override(self):
         text = (ROOT / ".env.dev.example").read_text()

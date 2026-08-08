@@ -1,0 +1,27 @@
+# Internal transaction overlay. The pull script creates stopped backup
+# containers in a separate Compose project before replacing the live ones.
+services:
+  api-dev:
+    image: ${GROK2API_DEV_BACKUP_API_IMAGE:-scratch}
+    container_name: ${GROK2API_DEV_BACKUP_API_NAME:-grokcli-2api-unused-api}
+    pull_policy: never
+    restart: "no"
+    volumes: !override []
+    volumes_from:
+      - container:${GROK2API_DEV_OLD_API_NAME:-grokcli-2api-unused-api}
+  solver-dev:
+    image: ${GROK2API_DEV_BACKUP_SOLVER_IMAGE:-scratch}
+    container_name: ${GROK2API_DEV_BACKUP_SOLVER_NAME:-grokcli-2api-unused-solver}
+    pull_policy: never
+    restart: "no"
+    volumes: !override []
+    volumes_from:
+      - container:${GROK2API_DEV_OLD_SOLVER_NAME:-grokcli-2api-unused-solver}
+  assets-dev:
+    image: ${GROK2API_DEV_BACKUP_ASSETS_IMAGE:-scratch}
+    container_name: ${GROK2API_DEV_BACKUP_ASSETS_NAME:-grokcli-2api-unused-assets}
+    pull_policy: never
+    restart: "no"
+    volumes: !override []
+    volumes_from:
+      - container:${GROK2API_DEV_OLD_ASSETS_NAME:-grokcli-2api-unused-assets}

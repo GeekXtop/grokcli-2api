@@ -367,6 +367,11 @@ GROK2API_DEV_IMAGE=ghcr.io/geekxtop/grokcli-2api:sha-dev-<commit> \
   ./scripts/g2a-dev-pull.sh
 ```
 
+当镜像值是 `sha-dev-*` 时，脚本会自动叠加 `compose.dev.pinned.yml`，移除三个服务的
+`.:/app` 主机源码挂载；API、solver 和 assets 都从该 SHA 镜像中的源码、预编译程序和
+脚本启动。因此这是不依赖当前 checkout 的 image-only 回滚模式，也不会进行本地热更新。
+默认 `dev` 流程不叠加该 overlay，仍保留源码挂载和容器内 Go watcher。
+
 标签用途如下：
 
 | 标签 | 用途 |
@@ -376,9 +381,9 @@ GROK2API_DEV_IMAGE=ghcr.io/geekxtop/grokcli-2api:sha-dev-<commit> \
 | `local-customizations-dev` | `local-customizations` 稳定分支当前镜像 |
 | `sha-dev-<sha>` | 按提交固定的审计与回滚镜像 |
 
-源码仍以 `.:/app` 挂载；修改 `cmd/` 或 `internal/` 下的 Go 文件后，容器内
-watcher 会复用缓存并热编译、重启 API。更新脚本不执行 `down`、`rm` 或卷清理，
-不会删除 PostgreSQL、Redis 或应用数据卷。
+默认 `dev` 源码仍以 `.:/app` 挂载；修改 `cmd/` 或 `internal/` 下的 Go 文件后，容器内
+watcher 会复用缓存并热编译、重启 API。更新脚本不执行 `docker compose down`、卷 prune
+或带 `-v` 的容器清理；事务只移除临时候选容器，不会删除 PostgreSQL、Redis 或应用数据卷。
 
 #### GHCR 不可用时的显式本地 overlay
 

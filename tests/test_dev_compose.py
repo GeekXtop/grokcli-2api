@@ -83,6 +83,87 @@ class DevComposeTests(unittest.TestCase):
             self.config["services"]["api-dev"]["entrypoint"],
         )
 
+    def test_pinned_sha_overlay_disables_host_source_mount(self):
+        env = dict(os.environ)
+        env["GROK2API_ENV_FILE"] = ".env.dev.example"
+        env["GROK2API_DEV_IMAGE"] = (
+            "ghcr.io/geekxtop/grokcli-2api:sha-dev-0123456789ab"
+        )
+        result = subprocess.run(
+            [
+                "docker",
+                "compose",
+                "-f",
+                "compose.dev.yml",
+                "-f",
+                "compose.dev.pinned.yml",
+                "config",
+                "--format",
+                "json",
+            ],
+            cwd=ROOT,
+            env=env,
+            text=True,
+            capture_output=True,
+            check=True,
+        )
+        config = json.loads(result.stdout)
+        for service in config["services"].values():
+            self.assertFalse(
+                any(
+                    (volume == ".:/app")
+                    or (
+                        isinstance(volume, dict)
+                        and volume.get("target") == "/app"
+                        and Path(volume.get("source", "")).resolve() == ROOT.resolve()
+                    )
+                    for volume in service.get("volumes", [])
+                )
+            )
+
+    def test_backup_overlay_uses_old_images_and_volume_sources(self):
+        env = dict(os.environ)
+        env.update(
+            {
+                "GROK2API_ENV_FILE": ".env.dev.example",
+                "GROK2API_DEV_BACKUP_API_IMAGE": "sha256:api-old",
+                "GROK2API_DEV_BACKUP_SOLVER_IMAGE": "sha256:solver-old",
+                "GROK2API_DEV_BACKUP_ASSETS_IMAGE": "sha256:assets-old",
+                "GROK2API_DEV_OLD_API_NAME": "grokcli-2api-api-dev",
+                "GROK2API_DEV_OLD_SOLVER_NAME": "grokcli-2api-solver-dev",
+                "GROK2API_DEV_OLD_ASSETS_NAME": "grokcli-2api-assets-dev",
+                "GROK2API_DEV_BACKUP_API_NAME": "g2a-dev-backup-api",
+                "GROK2API_DEV_BACKUP_SOLVER_NAME": "g2a-dev-backup-solver",
+                "GROK2API_DEV_BACKUP_ASSETS_NAME": "g2a-dev-backup-assets",
+            }
+        )
+        result = subprocess.run(
+            [
+                "docker",
+                "compose",
+                "-p",
+                "g2a-dev-backup-test",
+                "-f",
+                "compose.dev.yml",
+                "-f",
+                "compose.dev.backup.yml",
+                "config",
+                "--format",
+                "json",
+            ],
+            cwd=ROOT,
+            env=env,
+            text=True,
+            capture_output=True,
+            check=True,
+        )
+        config = json.loads(result.stdout)
+        for service in config["services"].values():
+            self.assertEqual("never", service["pull_policy"])
+            self.assertEqual([], service.get("volumes", []))
+            self.assertEqual(1, len(service["volumes_from"]))
+            self.assertTrue(service["volumes_from"][0].startswith("container:"))
+
     def test_local_overlay_uses_prebuilt_image_and_only_api_builds(self):
         services = self.overlay_config["services"]
         for service in services.values():

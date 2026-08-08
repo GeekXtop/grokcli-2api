@@ -24,7 +24,7 @@ Fork 开发默认入口是：
 `ghcr.io/geekxtop/grokcli-2api:dev`），随后执行
 `docker compose ... up -d --force-recreate --no-build`，并轮询 API `/health`、`/ready`
 及 solver `/health`。拉取或健康检查失败时会打印 `ps`/`logs` 诊断，不执行
-`down`、`rm`、`volume prune` 或其他卷删除操作；可用固定的
+`docker compose down`、`volume prune` 或带 `-v` 的卷删除操作；事务只清理临时候选容器。可用固定的
 `sha-dev-<commit>` 标签重试或回滚。
 
 `GROK2API_DEV_IMAGE` 由 Compose 插值，可由 shell 或 project environment 覆盖：
@@ -34,6 +34,12 @@ GROK2API_DEV_IMAGE=ghcr.io/geekxtop/grokcli-2api:sha-dev-<commit> \
   ./scripts/g2a-dev-pull.sh
 ```
 
+使用 `sha-dev-*` 时，脚本会自动叠加 `compose.dev.pinned.yml` 并移除 `.:/app` 源码挂载，
+所以回滚实际运行的是 SHA 镜像内的代码（image-only，无当前 checkout 热更新）。默认
+`dev` 标签不使用该 overlay，保留源码挂载与 Go watcher。脚本通过独立的
+`compose.dev.backup.yml` 事务 overlay 保存旧镜像/卷引用；启动或健康检查失败时只移除候选
+容器并恢复旧容器，不执行卷删除。
+
 GHCR 暂不可用时，显式使用本地构建 overlay：
 
 ```bash
@@ -41,7 +47,7 @@ docker compose -f compose.dev.yml -f compose.dev.local.yml build api-dev
 docker compose -f compose.dev.yml -f compose.dev.local.yml up -d --force-recreate
 ```
 
-开发镜像仅发布 `linux/amd64`；源码挂载和容器内 Go watcher 仍由
+开发镜像仅发布 `linux/amd64`；默认 `dev` 的源码挂载和容器内 Go watcher 仍由
 `compose.dev.yml` 保持。生产升级请遵循 `docs/UPGRADE.md` 的生产章节，不要把开发标签
 当作生产默认。
 
