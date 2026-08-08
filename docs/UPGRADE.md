@@ -142,6 +142,79 @@ Docker 入口会自动跑 `grok2api-migrate up`（≥2.0.1）。Go 进程本身�
 
 ---
 
+## Fork 开发镜像升级（GHCR + 热更新）
+
+本节只用于 `local-customizations` fork 的开发环境，不是生产升级步骤，也不会改变
+上面的生产 Compose、数据库迁移或生产镜像默认值。开发镜像首版只支持
+`linux/amd64`，默认地址为 `ghcr.io/geekxtop/grokcli-2api:dev`。
+
+### 常规 pull、重建与健康检查
+
+先准备仅供本机使用的环境文件（不要把 token、密码或真实数据库凭据提交到模板）：
+
+```bash
+cp .env.dev.example .env.dev
+./scripts/g2a-dev-pull.sh
+```
+
+`g2a-dev-pull.sh` 会拉取镜像，然后执行
+`docker compose -f compose.dev.yml up -d --force-recreate --no-build`，并在
+`40081/health`、`40081/ready` 与 `5072/health` 上做有界健康检查。成功后可查看：
+
+```bash
+docker compose -f compose.dev.yml ps
+docker compose -f compose.dev.yml logs -f api-dev
+```
+
+拉取失败或健康检查超时会返回非零并打印 `ps`/`logs` 诊断；**拉取失败不清理**，
+脚本不执行 `down`、`rm`、`volume prune`，也不删除 PostgreSQL、Redis 或应用数据卷。
+现有容器会保持运行，修复网络或标签后可再次执行脚本。需要手动诊断时：
+
+```bash
+docker compose -f compose.dev.yml ps
+docker compose -f compose.dev.yml logs --tail 120 api-dev solver-dev assets-dev
+curl -fsS http://127.0.0.1:40081/health
+curl -fsS http://127.0.0.1:40081/ready
+curl -fsS http://127.0.0.1:5072/health
+```
+
+`GROK2API_DEV_IMAGE` 是 Compose 插值变量，可由 shell 环境或 Compose project
+environment（例如 `.env` / `--env-file`）覆盖；更新脚本本身不会 source `.env.dev`。
+标签用途如下：
+
+| 标签 | 用途 |
+|------|------|
+| `dev` | 日常开发的可变默认标签 |
+| `ci-dev-<sha>` | 通过 CI smoke 前的候选标签 |
+| `local-customizations-dev` | 稳定开发分支标签 |
+| `sha-dev-<sha>` | 固定提交、审计和回滚标签 |
+
+按提交回滚或复现问题：
+
+```bash
+GROK2API_DEV_IMAGE=ghcr.io/geekxtop/grokcli-2api:sha-dev-<commit> \
+  ./scripts/g2a-dev-pull.sh
+```
+
+开发 Compose 继续挂载 `.:/app`；`GROK2API_RUNTIME=go`、单 worker、
+`GROK2API_RELOAD=1` 保持开发热更新，Go 文件修改由容器内 watcher 增量编译并热重启。
+
+### GHCR 不可用时的本地救援 overlay
+
+本地构建必须显式指定 `compose.dev.local.yml`，不会成为默认更新路径：
+
+```bash
+docker compose -f compose.dev.yml -f compose.dev.local.yml build api-dev
+docker compose -f compose.dev.yml -f compose.dev.local.yml up -d --force-recreate
+```
+
+该 overlay 使用 Dockerfile 的 `development` target，并将三个开发服务指向本地
+`grokcli-2api:dev`；需要私有依赖时，凭据只从 shell/project environment 作为
+BuildKit secret 提供，不写入 `.env.dev.example` 或镜像层。生产环境仍按本文件的生产
+章节使用版本化生产标签，不要把 `dev` 或 `sha-dev-*` 当作生产默认。
+
+---
+
 ## 包结构迁移提示
 
 真实实现已收敛到 `grok2api/` 包内：

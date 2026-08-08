@@ -331,6 +331,68 @@ go build -o bin/grok2api ./cmd/grok2api && ./bin/grok2api
 - 注册 / SSO / Turnstile 仍走 loopback Python sidecar（见 `docs/PYTHON_SIDECAR.md`）
 - 管理台静态资源变更可跑 `python scripts/build_admin_assets.py`
 
+### Fork 开发环境（GHCR + 热更新）
+
+本节只适用于 fork 的 `local-customizations` 开发分支，不改变生产
+`docker-compose.yml`、生产镜像或生产默认值。开发 Compose 默认使用
+`ghcr.io/geekxtop/grokcli-2api:dev`，并把源码挂载到容器的 `/app`；镜像首版只发布
+`linux/amd64`。
+
+#### 默认拉取、启动与健康检查
+
+```bash
+cp .env.dev.example .env.dev
+./scripts/g2a-dev-pull.sh
+docker compose -f compose.dev.yml ps
+docker compose -f compose.dev.yml logs -f api-dev
+```
+
+`g2a-dev-pull.sh` 会执行镜像 pull、`up -d --force-recreate --no-build`，然后检查
+API 的 `/health`、`/ready` 和 solver 的 `/health`。失败时脚本保留现有容器并输出
+`docker compose ... ps` 与 `logs` 诊断；也可以手动查看：
+
+```bash
+docker compose -f compose.dev.yml ps
+docker compose -f compose.dev.yml logs --tail 120 api-dev solver-dev assets-dev
+curl -fsS http://127.0.0.1:40081/health
+curl -fsS http://127.0.0.1:40081/ready
+curl -fsS http://127.0.0.1:5072/health
+```
+
+Compose 插值变量可以由 shell 环境或 Compose project environment（例如 `.env` / `--env-file`）
+覆盖。要固定某次镜像或排查标签漂移，可显式设置 `GROK2API_DEV_IMAGE`：
+
+```bash
+GROK2API_DEV_IMAGE=ghcr.io/geekxtop/grokcli-2api:sha-dev-<commit> \
+  ./scripts/g2a-dev-pull.sh
+```
+
+标签用途如下：
+
+| 标签 | 用途 |
+|------|------|
+| `dev` | 日常开发默认的可变标签 |
+| `ci-dev-<sha>` | CI 构建后、晋级前的候选镜像 |
+| `local-customizations-dev` | `local-customizations` 稳定分支当前镜像 |
+| `sha-dev-<sha>` | 按提交固定的审计与回滚镜像 |
+
+源码仍以 `.:/app` 挂载；修改 `cmd/` 或 `internal/` 下的 Go 文件后，容器内
+watcher 会复用缓存并热编译、重启 API。更新脚本不执行 `down`、`rm` 或卷清理，
+不会删除 PostgreSQL、Redis 或应用数据卷。
+
+#### GHCR 不可用时的显式本地 overlay
+
+本地构建是救援路径，必须显式叠加 `compose.dev.local.yml`，不会被默认开发流程隐式触发：
+
+```bash
+docker compose -f compose.dev.yml -f compose.dev.local.yml build api-dev
+docker compose -f compose.dev.yml -f compose.dev.local.yml up -d --force-recreate
+```
+
+该 overlay 只把 `api-dev` 指向 Dockerfile 的 `development` target，并让三个开发服务
+使用本地 `grokcli-2api:dev`；需要私有依赖时，凭据仅从 shell/project environment
+注入 BuildKit secret，不写入 `.env.dev.example`、源码或镜像层。
+
 ---
 
 ## 从 1.x / 旧版升级到 2.0.4
@@ -834,4 +896,3 @@ environment:
 | `GROK2API_GITHUB_TOKEN` | 提高 GitHub Release 检查限流额度 |
 
 兼容：若仍要宿主机 watcher，设置 `GROK2API_HOT_UPDATE_MODE=request_file` 并运行 `scripts/g2a-update-watcher.sh`。
-

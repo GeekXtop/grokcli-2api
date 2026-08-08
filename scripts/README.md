@@ -9,6 +9,41 @@
 | `build_admin_assets.py` | 管理台静态资源打包（`static/js` → `static/dist`） |
 | `upgrade_from_file_backend.sh` | file 后端 → hybrid（PG/Redis）升级迁移 |
 | `smoke_go_messages.sh` | Go messages 冒烟 |
+| `g2a-dev-pull.sh` | 拉取 GHCR 开发镜像、无构建强制重建开发服务并检查 API/solver 健康；失败时保留容器和数据卷 |
+| `ci/smoke_dev_image.sh` | 在 development 镜像内校验预编译 Go 程序、源码指纹和编译缓存 |
+
+### GHCR 开发镜像更新
+
+Fork 开发默认入口是：
+
+```bash
+./scripts/g2a-dev-pull.sh
+```
+
+脚本使用 `compose.dev.yml` 拉取 `GROK2API_DEV_IMAGE`（默认
+`ghcr.io/geekxtop/grokcli-2api:dev`），随后执行
+`docker compose ... up -d --force-recreate --no-build`，并轮询 API `/health`、`/ready`
+及 solver `/health`。拉取或健康检查失败时会打印 `ps`/`logs` 诊断，不执行
+`down`、`rm`、`volume prune` 或其他卷删除操作；可用固定的
+`sha-dev-<commit>` 标签重试或回滚。
+
+`GROK2API_DEV_IMAGE` 由 Compose 插值，可由 shell 或 project environment 覆盖：
+
+```bash
+GROK2API_DEV_IMAGE=ghcr.io/geekxtop/grokcli-2api:sha-dev-<commit> \
+  ./scripts/g2a-dev-pull.sh
+```
+
+GHCR 暂不可用时，显式使用本地构建 overlay：
+
+```bash
+docker compose -f compose.dev.yml -f compose.dev.local.yml build api-dev
+docker compose -f compose.dev.yml -f compose.dev.local.yml up -d --force-recreate
+```
+
+开发镜像仅发布 `linux/amd64`；源码挂载和容器内 Go watcher 仍由
+`compose.dev.yml` 保持。生产升级请遵循 `docs/UPGRADE.md` 的生产章节，不要把开发标签
+当作生产默认。
 
 JSON → PG 迁移请用 Go：
 
