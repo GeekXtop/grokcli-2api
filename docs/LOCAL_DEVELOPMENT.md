@@ -39,8 +39,6 @@ API 默认监听 `0.0.0.0:40081`，可通过局域网地址 `http://192.168.100.
 
 构建放在 CI 而不是本地，因为本机构建这套镜像太慢。镜像由 GitHub Actions 在推送 `local-customizations` 后构建。
 
-> 仓库根目录的 `sync-upstream.ps1` 已过时——它操作的 `dev` 分支不存在，跑了只会同步 `main` 然后静默跳过。用 `g2a-update.sh` 代替。
-
 ## 同步上游（手工分解）
 
 `g2a-update.sh` 已经封装了这些步骤，下面只在需要手工接管时参考：
