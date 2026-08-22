@@ -23,22 +23,27 @@ API 默认监听 `0.0.0.0:40081`，可通过局域网地址 `http://192.168.100.
 ## 需要新镜像时：一条命令
 
 ```bash
-./scripts/g2a-dev-pull.sh
+./scripts/g2a-update.sh
 ```
 
-拉取 `ghcr.io/geekxtop/grokcli-2api:dev` 并事务性替换三个容器：先用旧镜像建好停止状态的备份容器（`volumes_from` 保留数据卷），再替换、等 `/health`、`/ready` 和 solver `/health` 全通过；任何一步失败自动把旧容器改名恢复并启动，**不会删除任何数据卷**。
+一键完成：同步 `upstream/main` → 合并进 `local-customizations` → 推送触发 CI → 等构建完成 → 拉取镜像并事务性替换容器 → 健康检查。上游没更新且远端已同步时会自动跳过 CI 等待，直接拉取现有镜像。
 
-镜像由 GitHub Actions 在推送 `local-customizations` 后构建。所以完整链路是：
+其他用法：
 
 ```bash
-git push origin local-customizations   # 触发 CI 构建
-# 等 Actions 变绿
-./scripts/g2a-dev-pull.sh              # 拉取并替换
+./scripts/g2a-update.sh --pull-only   # 不碰 git，只拉当前 dev 镜像并替换
+./scripts/g2a-update.sh --no-wait     # 推送后不等 CI，稍后自己跑 --pull-only
 ```
 
-构建放在 CI 而不是本地，因为本机构建这套镜像太慢。
+它内部调用的 `./scripts/g2a-dev-pull.sh` 也可以单独用：拉取 `ghcr.io/geekxtop/grokcli-2api:dev` 并事务性替换三个容器——先用旧镜像建好停止状态的备份容器（`volumes_from` 保留数据卷），再替换、等 `/health`、`/ready` 和 solver `/health` 全通过；任何一步失败自动把旧容器改名恢复并启动，**不会删除任何数据卷**。
 
-## 同步上游
+构建放在 CI 而不是本地，因为本机构建这套镜像太慢。镜像由 GitHub Actions 在推送 `local-customizations` 后构建。
+
+> 仓库根目录的 `sync-upstream.ps1` 已过时——它操作的 `dev` 分支不存在，跑了只会同步 `main` 然后静默跳过。用 `g2a-update.sh` 代替。
+
+## 同步上游（手工分解）
+
+`g2a-update.sh` 已经封装了这些步骤，下面只在需要手工接管时参考：
 
 ```bash
 git switch main
@@ -47,10 +52,11 @@ git merge --ff-only upstream/main
 
 git switch local-customizations
 git merge main
+git push origin main
 git push origin local-customizations
 ```
 
-`main` 只同步上游；本地配置和代码修改只提交到 `local-customizations`。推送后等 CI 构建完，再跑 `./scripts/g2a-dev-pull.sh`。
+`main` 只同步上游；本地配置和代码修改只提交到 `local-customizations`。
 
 ## 回滚到某次提交的镜像
 
