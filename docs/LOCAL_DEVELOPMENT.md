@@ -4,7 +4,70 @@
 
 API 默认监听 `0.0.0.0:40081`，可通过局域网地址 `http://192.168.100.105:40081/admin` 访问。Turnstile Solver 仍只监听 `127.0.0.1:5072`，不会暴露到局域网。
 
-PostgreSQL 数据库必须使用 UTF-8 编码；项目初始化 Schema 时包含 Unicode 文本，`SQL_ASCII` 数据库会启动失败。示例：
+---
+
+## 日常：改代码不需要重建
+
+仓库目录挂载在容器的 `/app`，entrypoint 是 `dev_watch.py`。**改本地代码存盘即生效**，watcher 自动重启对应进程：
+
+| 改动 | 效果 |
+| --- | --- |
+| `cmd/`、`internal/` 下的 Go 文件 | 容器内 watcher 复用缓存热编译、重启 API |
+| Python API | Uvicorn 自动重启 |
+| `turnstile-solver/*.py` | 只重启 Solver 子进程 |
+| `static/js`、`static/css` | 自动运行资源构建脚本 |
+| HTML | 直接从挂载仓库读取 |
+
+**不要因为改了源码就去 `docker compose build`。** 只有 Dockerfile、`requirements*.txt` 或系统依赖变化时才需要新镜像。
+
+## 需要新镜像时：一条命令
+
+```bash
+./scripts/g2a-dev-pull.sh
+```
+
+拉取 `ghcr.io/geekxtop/grokcli-2api:dev` 并事务性替换三个容器：先用旧镜像建好停止状态的备份容器（`volumes_from` 保留数据卷），再替换、等 `/health`、`/ready` 和 solver `/health` 全通过；任何一步失败自动把旧容器改名恢复并启动，**不会删除任何数据卷**。
+
+镜像由 GitHub Actions 在推送 `local-customizations` 后构建。所以完整链路是：
+
+```bash
+git push origin local-customizations   # 触发 CI 构建
+# 等 Actions 变绿
+./scripts/g2a-dev-pull.sh              # 拉取并替换
+```
+
+构建放在 CI 而不是本地，因为本机构建这套镜像太慢。
+
+## 同步上游
+
+```bash
+git switch main
+git fetch upstream
+git merge --ff-only upstream/main
+
+git switch local-customizations
+git merge main
+git push origin local-customizations
+```
+
+`main` 只同步上游；本地配置和代码修改只提交到 `local-customizations`。推送后等 CI 构建完，再跑 `./scripts/g2a-dev-pull.sh`。
+
+## 回滚到某次提交的镜像
+
+```bash
+GROK2API_DEV_IMAGE=ghcr.io/geekxtop/grokcli-2api:sha-dev-<12位SHA> \
+  ./scripts/g2a-dev-pull.sh
+```
+
+镜像值是 `sha-dev-*` 时脚本自动叠加 `compose.dev.pinned.yml`，移除 `.:/app` 挂载——三个服务都从镜像里的代码启动，**不受当前 checkout 影响，也没有热重载**。这是回滚/排查模式，查完记得跑一次不带参数的 `./scripts/g2a-dev-pull.sh` 回到日常模式。
+
+可用标签见 [README 的 Fork 开发环境章节](../README.md#fork-开发环境ghcr--热更新)。
+
+---
+
+## 首次启动
+
+PostgreSQL 数据库必须使用 UTF-8 编码；项目初始化 Schema 时包含 Unicode 文本，`SQL_ASCII` 数据库会启动失败：
 
 ```bash
 sudo -u postgres psql -c "CREATE ROLE grok2api LOGIN PASSWORD '替换密码';"
@@ -16,24 +79,12 @@ sudo -u postgres createdb \
   grok2api
 ```
 
-## 首次启动
-
 ```bash
 cp .env.dev.example .env.dev
 # 编辑数据库、Redis、管理密码和 GROK2API_SECRET_KEY
-docker compose -f compose.dev.yml build
-docker compose -f compose.dev.yml up -d
+./scripts/g2a-dev-pull.sh
 docker compose -f compose.dev.yml logs -f
 ```
-
-## 日常修改
-
-- Python API：Uvicorn 自动重启。
-- `turnstile-solver/*.py`：只重启 Solver 子进程。
-- `static/js`、`static/css`：自动运行资源构建脚本。
-- HTML：直接从挂载仓库读取。
-
-源码修改后不要执行 `docker compose build`。只有 Dockerfile、requirements 或 Go 编译产物变化时才重建。
 
 ## 状态检查
 
@@ -58,15 +109,4 @@ docker compose -f compose.dev.yml logs -f api-dev solver-dev assets-dev
 docker compose -f compose.dev.yml down
 ```
 
-## 同步上游
-
-```bash
-git switch main
-git fetch upstream
-git merge --ff-only upstream/main
-
-git switch local-customizations
-git merge main
-```
-
-`main` 只同步上游；本地配置和代码修改只提交到 `local-customizations`。
+GHCR 不可用时的本地构建救援路径见 [README](../README.md#ghcr-不可用时的显式本地-overlay)。
